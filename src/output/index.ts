@@ -42,3 +42,11 @@ export {
   type OfxExportOptions,
   type SplitOfxResult,
 } from './ofx-exporter.js';
+
+export {
+  exportCsv,
+  exportAccountCsv,
+  exportCsvByAccount,
+  type CsvExportOptions,
+  type SplitCsvResult,
+} from './csv-exporter.js';

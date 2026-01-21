@@ -11,9 +11,9 @@ import {
   validateOutputOrThrow,
   AVAILABLE_SCHEMA_VERSIONS,
 } from '../schemas/schema-registry.js';
-import { toFinalResult, toFinalResultV2, exportOfx, exportOfxByAccount, type CanonicalOutput } from '../output/index.js';
+import { toFinalResult, toFinalResultV2, exportOfx, exportOfxByAccount, exportCsv, exportCsvByAccount, type CanonicalOutput } from '../output/index.js';
 
-const AVAILABLE_FORMATS = ['json', 'ofx'] as const;
+const AVAILABLE_FORMATS = ['json', 'ofx', 'csv'] as const;
 type OutputFormat = typeof AVAILABLE_FORMATS[number];
 import { PARSER_VERSION } from '../utils/constants.js';
 import { scanDirectoryForPdfs, validateDirectory } from '../utils/directory-scanner.js';
@@ -46,7 +46,7 @@ program
   )
   .option(
     '--split-accounts',
-    'Split OFX output into separate files per account (only with --format ofx)',
+    'Split output into separate files per account (only with --format ofx or csv)',
     false
   )
   .action(async (pdfFile: string | undefined, options: {
@@ -224,6 +224,42 @@ async function processDirectory(inputDir: string, options: CliOptions): Promise<
         console.log(outputContent);
       }
     }
+  } else if (format === 'csv') {
+    // CSV requires v2 format
+    const v2Output = toFinalResultV2(canonical);
+    
+    if (options.splitAccounts) {
+      // Split into separate files per account
+      const splitResults = exportCsvByAccount(v2Output);
+      
+      if (options.verbose) {
+        console.error(`[INFO] Splitting CSV into ${splitResults.length} account file(s)`);
+      }
+      
+      // Determine output directory (use --out as directory or current dir)
+      const outDir = options.out !== undefined ? resolve(options.out) : process.cwd();
+      
+      for (const result of splitResults) {
+        const filePath = resolve(outDir, result.filename);
+        await writeFile(filePath, result.content, 'utf-8');
+        console.error(`[INFO] Written: ${filePath} (${result.accountType} ****${result.accountLast4})`);
+      }
+    } else {
+      // Single combined CSV file
+      const outputContent = exportCsv(v2Output);
+      if (options.verbose) {
+        console.error(`[INFO] Generated CSV with ${v2Output.totalTransactions} transaction(s)`);
+      }
+      
+      if (options.out !== undefined) {
+        const outPath = resolve(options.out);
+        await writeFile(outPath, outputContent, 'utf-8');
+        console.error(`[INFO] Output written to: ${outPath}`);
+      } else {
+        // eslint-disable-next-line no-console
+        console.log(outputContent);
+      }
+    }
   } else {
     // Default JSON output
     const outputContent = options.pretty
@@ -379,6 +415,17 @@ async function processSingleFile(pdfFile: string, options: CliOptions): Promise<
     outputContent = exportOfx(v2Output);
     if (options.verbose) {
       console.error(`[INFO] Generated OFX with ${v2Output.accounts.length} account(s)`);
+    }
+  } else if (format === 'csv') {
+    // CSV requires v2 format - build canonical if in single mode
+    if (options.single || canonical === null) {
+      console.error('[ERROR] CSV format requires multi-statement mode. Remove --single flag.');
+      process.exit(1);
+    }
+    const v2Output = toFinalResultV2(canonical);
+    outputContent = exportCsv(v2Output);
+    if (options.verbose) {
+      console.error(`[INFO] Generated CSV with ${v2Output.totalTransactions} transaction(s)`);
     }
   } else {
     // Default JSON output
