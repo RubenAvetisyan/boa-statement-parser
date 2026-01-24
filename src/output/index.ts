@@ -50,3 +50,15 @@ export {
   type CsvExportOptions,
   type SplitCsvResult,
 } from './csv-exporter.js';
+
+export {
+  detectRecurring,
+  detectRecurringFromStatements,
+  getRecurringFlags,
+  type RecurringTransaction,
+  type RecurringFrequency,
+  type RecurringPattern,
+  type RecurringSummary,
+  type RecurringDetectionResult,
+  type RecurringDetectionOptions,
+} from './recurring-detector.js';

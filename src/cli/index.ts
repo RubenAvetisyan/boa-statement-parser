@@ -15,7 +15,7 @@ import {
   validateOutputOrThrow,
   AVAILABLE_SCHEMA_VERSIONS,
 } from '../schemas/schema-registry.js';
-import { toFinalResult, toFinalResultV2, exportOfx, exportOfxByAccount, exportCsv, exportCsvByAccount, type CanonicalOutput } from '../output/index.js';
+import { toFinalResult, toFinalResultV2, exportOfx, exportOfxByAccount, exportCsv, exportCsvByAccount, detectRecurringFromStatements, type CanonicalOutput } from '../output/index.js';
 
 const AVAILABLE_FORMATS = ['json', 'ofx', 'csv'] as const;
 type OutputFormat = typeof AVAILABLE_FORMATS[number];
@@ -67,6 +67,7 @@ program
   .option('--model <path>', 'Path to ML model directory (for loading or saving)', process.env['BOA_MODEL_PATH'] ?? (envBool('BOA_ML', false) ? './models/categorizer' : undefined))
   .option('--model-out <path>', 'Output path for trained ML model', process.env['BOA_MODEL_OUT'])
   .option('--epochs <number>', 'Number of training epochs', process.env['BOA_EPOCHS'] ?? '50')
+  .option('--detect-recurring', 'Detect recurring transactions and include in output', envBool('BOA_DETECT_RECURRING', false))
   .action(async (pdfFile: string | undefined, options: {
     inputDir?: string;
     out?: string;
@@ -82,6 +83,7 @@ program
     model?: string;
     modelOut?: string;
     epochs: string;
+    detectRecurring: boolean;
   }) => {
     try {
       // ML Training mode
@@ -126,6 +128,7 @@ interface CliOptions {
   model?: string;
   modelOut?: string;
   epochs: string;
+  detectRecurring: boolean;
 }
 
 /**
@@ -340,9 +343,33 @@ async function processDirectory(inputDir: string, options: CliOptions): Promise<
     }
   } else {
     // Default JSON output
+    let finalOutput: unknown = output;
+    
+    // Add recurring detection if enabled
+    if (options.detectRecurring) {
+      if (options.verbose) {
+        console.error('[INFO] Detecting recurring transactions...');
+      }
+      
+      const recurringResult = detectRecurringFromStatements(result.statements);
+      
+      if (options.verbose) {
+        console.error(`[INFO] Found ${recurringResult.summary.totalPatterns} recurring pattern(s)`);
+        console.error(`[INFO] ${recurringResult.summary.totalRecurringTransactions} transactions identified as recurring`);
+        console.error(`[INFO] Estimated monthly recurring: $${recurringResult.summary.estimatedMonthlyRecurring.toFixed(2)}`);
+        console.error(`[INFO] Subscriptions detected: ${recurringResult.summary.subscriptionCount}`);
+      }
+      
+      // Merge recurring data into output
+      finalOutput = {
+        ...(output as object),
+        recurring: recurringResult,
+      };
+    }
+    
     const outputContent = options.pretty
-      ? JSON.stringify(output, null, 2)
-      : JSON.stringify(output);
+      ? JSON.stringify(finalOutput, null, 2)
+      : JSON.stringify(finalOutput);
     
     if (options.out !== undefined) {
       const outPath = resolve(options.out);
@@ -547,9 +574,33 @@ async function processSingleFile(pdfFile: string, options: CliOptions): Promise<
     }
   } else {
     // Default JSON output
+    let finalOutput: unknown = output;
+    
+    // Add recurring detection if enabled (only for multi-statement mode)
+    if (options.detectRecurring && !options.single && canonical !== null) {
+      if (options.verbose) {
+        console.error('[INFO] Detecting recurring transactions...');
+      }
+      
+      const recurringResult = detectRecurringFromStatements(canonical.statements);
+      
+      if (options.verbose) {
+        console.error(`[INFO] Found ${recurringResult.summary.totalPatterns} recurring pattern(s)`);
+        console.error(`[INFO] ${recurringResult.summary.totalRecurringTransactions} transactions identified as recurring`);
+        console.error(`[INFO] Estimated monthly recurring: $${recurringResult.summary.estimatedMonthlyRecurring.toFixed(2)}`);
+        console.error(`[INFO] Subscriptions detected: ${recurringResult.summary.subscriptionCount}`);
+      }
+      
+      // Merge recurring data into output
+      finalOutput = {
+        ...(output as object),
+        recurring: recurringResult,
+      };
+    }
+    
     outputContent = options.pretty
-      ? JSON.stringify(output, null, 2)
-      : JSON.stringify(output);
+      ? JSON.stringify(finalOutput, null, 2)
+      : JSON.stringify(finalOutput);
   }
 
   if (options.out !== undefined) {

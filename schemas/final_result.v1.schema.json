@@ -30,7 +30,8 @@
     "parseErrors": {
       "type": "array",
       "items": { "$ref": "#/$defs/parseError" }
-    }
+    },
+    "recurring": { "$ref": "#/$defs/recurringDetection" }
   },
   "$defs": {
     "isoDate": {
@@ -191,6 +192,72 @@
       "properties": {
         "filename": { "type": "string" },
         "error": { "type": "string" }
+      }
+    },
+    "recurringFrequency": {
+      "type": "string",
+      "enum": ["weekly", "bi-weekly", "monthly", "quarterly", "semi-annual", "annual", "irregular"]
+    },
+    "recurringPattern": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["patternId", "merchantKey", "merchantName", "frequency", "averageIntervalDays", "intervalStdDev", "averageAmount", "amountVariance", "isFixedAmount", "category", "subcategory", "direction", "occurrenceCount", "firstSeen", "lastSeen", "expectedNext", "confidence", "isSubscription", "transactionIds"],
+      "properties": {
+        "patternId": { "type": "string" },
+        "merchantKey": { "type": "string" },
+        "merchantName": { "type": "string" },
+        "frequency": { "$ref": "#/$defs/recurringFrequency" },
+        "averageIntervalDays": { "type": "number", "minimum": 0 },
+        "intervalStdDev": { "type": "number", "minimum": 0 },
+        "averageAmount": { "type": "number" },
+        "amountVariance": { "type": "number", "minimum": 0 },
+        "isFixedAmount": { "type": "boolean" },
+        "category": { "type": "string" },
+        "subcategory": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
+        "direction": { "$ref": "#/$defs/direction" },
+        "occurrenceCount": { "type": "integer", "minimum": 2 },
+        "firstSeen": { "$ref": "#/$defs/isoDate" },
+        "lastSeen": { "$ref": "#/$defs/isoDate" },
+        "expectedNext": { "anyOf": [{ "$ref": "#/$defs/isoDate" }, { "type": "null" }] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "isSubscription": { "type": "boolean" },
+        "transactionIds": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "recurringSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["totalPatterns", "totalRecurringTransactions", "recurringPercentage", "estimatedMonthlyRecurring", "estimatedAnnualRecurring", "byFrequency", "subscriptionCount"],
+      "properties": {
+        "totalPatterns": { "type": "integer", "minimum": 0 },
+        "totalRecurringTransactions": { "type": "integer", "minimum": 0 },
+        "recurringPercentage": { "type": "number", "minimum": 0, "maximum": 100 },
+        "estimatedMonthlyRecurring": { "type": "number" },
+        "estimatedAnnualRecurring": { "type": "number" },
+        "byFrequency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["weekly", "bi-weekly", "monthly", "quarterly", "semi-annual", "annual", "irregular"],
+          "properties": {
+            "weekly": { "type": "integer", "minimum": 0 },
+            "bi-weekly": { "type": "integer", "minimum": 0 },
+            "monthly": { "type": "integer", "minimum": 0 },
+            "quarterly": { "type": "integer", "minimum": 0 },
+            "semi-annual": { "type": "integer", "minimum": 0 },
+            "annual": { "type": "integer", "minimum": 0 },
+            "irregular": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "subscriptionCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "recurringDetection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["patterns", "summary"],
+      "properties": {
+        "patterns": { "type": "array", "items": { "$ref": "#/$defs/recurringPattern" } },
+        "summary": { "$ref": "#/$defs/recurringSummary" }
       }
     }
   }
