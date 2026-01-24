@@ -520,6 +520,58 @@ pnpm parse-boa ./statement.pdf --schema-version v2
 FINAL_RESULT_SCHEMA_VERSION=v2 pnpm parse-boa ./statement.pdf
 ```
 
+## CSV Export
+
+The parser supports exporting to CSV format for spreadsheet import (Excel, Google Sheets, etc.).
+
+### CLI Usage
+
+```bash
+# Export single PDF to CSV
+pnpm parse-boa ./statement.pdf --format csv --out statement.csv
+
+# Export directory of PDFs to CSV
+pnpm parse-boa --inputDir ./statements --format csv --out combined.csv
+
+# Split into separate files per account (boa_checking_3529.csv, boa_savings_4971.csv)
+pnpm parse-boa --inputDir ./statements --format csv --split-accounts --out ./output/
+```
+
+### CSV Columns
+
+| Column | Description |
+|--------|-------------|
+| `Date` | Transaction date (ISO format) |
+| `Posted Date` | Posted date if available |
+| `Description` | Cleaned transaction description |
+| `Merchant` | Extracted merchant name |
+| `Amount` | Signed amount (negative for debits) |
+| `Direction` | `credit` or `debit` |
+| `Type` | Transaction type (Purchase, Deposit, Transfer, etc.) |
+| `Account Type` | `checking`, `credit`, `savings` |
+| `Account Number` | Masked account number |
+| `Category` | Assigned category |
+| `Subcategory` | Assigned subcategory |
+| `Confidence` | Categorization confidence score |
+
+### Programmatic Usage
+
+```typescript
+import { toFinalResultV2, exportCsv, exportCsvByAccount } from 'boa-statement-parser';
+
+// Convert to v2 format
+const v2Result = toFinalResultV2(canonicalOutput);
+
+// Export to CSV
+const csvText = exportCsv(v2Result);
+
+// Or export per account
+const splitResults = exportCsvByAccount(v2Result);
+for (const { filename, content } of splitResults) {
+  fs.writeFileSync(filename, content);
+}
+```
+
 ## OFX Export
 
 The parser supports exporting to OFX (Open Financial Exchange) format for import into accounting software like Quicken, GnuCash, or Dolibarr.
