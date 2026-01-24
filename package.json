@@ -8,6 +8,13 @@
   "bin": {
     "parse-boa": "dist/cli/index.js"
   },
+  "files": [
+    "dist",
+    "models",
+    "schemas",
+    ".env.example",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",

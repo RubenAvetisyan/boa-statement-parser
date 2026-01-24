@@ -27,14 +27,34 @@ A production-ready Node.js library and CLI for parsing Bank of America bank stat
 ## Installation
 
 ```bash
-# Using pnpm (recommended)
-pnpm install
+# Install globally from npm
+npm install -g boa-statement-parser
 
-# Using npm
-npm install
+# Or install locally in your project
+npm install boa-statement-parser
 ```
 
 ## Quick Start
+
+### Initialize Your Project
+
+After installing, run the init command to set up required files:
+
+```bash
+# Initialize with .env file and pre-trained ML model
+parse-boa init
+
+# Skip ML model (if you don't need ML categorization)
+parse-boa init --no-model
+
+# Overwrite existing files
+parse-boa init --force
+```
+
+This creates:
+- `.env` - Configuration file with sensible defaults
+- `models/categorizer/` - Pre-trained ML model for transaction categorization
+- `statements/` - Directory to place your PDF files
 
 ### CLI Usage
 
@@ -375,6 +395,14 @@ The training process:
 | `--epochs <number>` | Number of training epochs (default: 50) |
 | `--version` | Show version number |
 | `--help` | Show help |
+
+### Init Command
+
+| Option | Description |
+|--------|-------------|
+| `init` | Initialize project with .env file and ML model |
+| `init --force` | Overwrite existing files |
+| `init --no-model` | Skip copying ML model files |
 
 ## Output Schema Versioning
 
