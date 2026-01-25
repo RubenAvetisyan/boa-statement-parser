@@ -1,4 +1,4 @@
-export const PARSER_VERSION = '1.1.0';
+export const PARSER_VERSION = '1.1.1';
 
 export const BOA_INSTITUTION_NAME = 'Bank of America';
 

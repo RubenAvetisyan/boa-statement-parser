@@ -107,7 +107,7 @@ describe('parseBoaStatement integration', () => {
     const pdf = createMockCheckingPDF();
     const result = parseBoaStatement(pdf);
 
-    expect(result.statement.metadata.parserVersion).toBe('1.1.0');
+    expect(result.statement.metadata.parserVersion).toBe('1.1.1');
     expect(result.statement.metadata.parsedAt).toBeTruthy();
     expect(Array.isArray(result.statement.metadata.warnings)).toBe(true);
   });

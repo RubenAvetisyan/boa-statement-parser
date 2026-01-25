@@ -6,25 +6,16 @@ import type { RawTransaction, AccountInfo, BalanceInfo } from './types.js';
 /**
  * Pre-process a line to fix common OCR/extraction issues:
  * - Separates date from merchant when no space exists (e.g., "03/17/257-ELEVEN" -> "03/17/25 7-ELEVEN")
- * - For non-Conf# lines: separates glued trailing amounts
+ * 
+ * Note: Generic "glued amount" splitting was removed because:
+ * 1. Layout-aware PDF extraction now properly inserts separators between columns
+ * 2. The regex was incorrectly splitting amounts like "200.00" into "2 00.00"
+ * 3. Specific extractors handle Conf# and trace number cases
  */
 function preprocessLine(line: string): string {
-  // Always fix "03/17/257-ELEVEN" -> "03/17/25 7-ELEVEN"
-  const fixedDateJoin = line.replace(
+  // Fix "03/17/257-ELEVEN" -> "03/17/25 7-ELEVEN"
+  return line.replace(
     /^(\d{2}\/\d{2}\/\d{2})([A-Za-z0-9])/,
-    '$1 $2'
-  );
-
-  // IMPORTANT: do NOT do generic "glued amount" splitting on Conf# lines,
-  // because "...T0ZGTJ9B91,000.00" is ambiguous.
-  // Let the Zelle-specific extractor handle these cases.
-  if (/Conf#/i.test(fixedDateJoin)) {
-    return fixedDateJoin;
-  }
-
-  // For other cases (e.g., trace numbers), apply generic trailing amount split
-  return fixedDateJoin.replace(
-    /(\S)(-?\d{1,3}(?:,\d{3})*\.\d{2})$/,
     '$1 $2'
   );
 }
@@ -404,6 +395,16 @@ function extractTransactions(
         continue;
       }
       
+      // Handle multi-column check lines (e.g., "11/06/25	108	-2,300.00	12/08/25	109	-2,300.00")
+      if (currentSection === 'checks') {
+        const multiCheckTxns = parseMultiColumnCheckLine(processedLine, page.pageNumber, i, statementYear);
+        if (multiCheckTxns.length > 0) {
+          transactions.push(...multiCheckTxns);
+          pendingLine = null;
+          continue;
+        }
+      }
+
       const txn = parseTransactionLine(processedLine, page.pageNumber, i, statementYear, currentSection);
       if (txn !== null) {
         transactions.push(txn);
@@ -416,6 +417,49 @@ function extractTransactions(
     warnings.push('No transactions found in statement');
   }
 
+  return transactions;
+}
+
+/**
+ * Parse multi-column check lines where multiple checks appear on the same line.
+ * Format: "Date	Check#	Amount	Date	Check#	Amount"
+ * Example: "11/06/25	108	-2,300.00	12/08/25	109	-2,300.00"
+ */
+function parseMultiColumnCheckLine(
+  line: string,
+  pageNumber: number,
+  lineIndex: number,
+  statementYear: number
+): RawTransaction[] {
+  const transactions: RawTransaction[] = [];
+  
+  // Pattern for a single check entry: Date + Check# + Amount
+  // The check line can have multiple entries separated by tabs
+  const checkPattern = /(\d{2}\/\d{2}\/\d{2})\s+(\d{1,6})\s+(-?[0-9,]+\.\d{2})/g;
+  
+  let match: RegExpExecArray | null;
+  while ((match = checkPattern.exec(line)) !== null) {
+    const [, dateStr, checkNum, amountStr] = match;
+    if (dateStr === undefined || checkNum === undefined || amountStr === undefined) {
+      continue;
+    }
+    
+    let amount = amountStr;
+    if (!amount.startsWith('-')) {
+      amount = `-${amount}`;
+    }
+    
+    transactions.push({
+      date: parseUSDate(dateStr, statementYear),
+      description: `Check #${checkNum}`,
+      amount,
+      page: pageNumber,
+      lineIndex,
+      originalLine: line,
+      section: 'checks',
+    });
+  }
+  
   return transactions;
 }
 
