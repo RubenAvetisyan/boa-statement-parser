@@ -138,7 +138,7 @@ console.log(result.statement.metadata.warnings);
 
 ## Output JSON Schema
 
-The output conforms to JSON Schema Draft 2020-12. See `JSON_SCHEMA.json` for the full schema.
+The output conforms to JSON Schema Draft 2020-12. See `schemas/final_result.v1.schema.json` and `schemas/final_result.v2.schema.json` for the full schemas.
 
 ```typescript
 {

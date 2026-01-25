@@ -1,5 +1,5 @@
 /**
- * Output types aligned exactly with TS_OUTPUT_SHAPE.ts and JSON_SCHEMA.json
+ * Output types aligned with schemas/final_result.*.schema.json
  * These are the canonical types for parser output.
  */
 
