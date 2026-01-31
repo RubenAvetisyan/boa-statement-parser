@@ -8,7 +8,8 @@ A production-ready Node.js library and CLI for parsing Bank of America bank stat
 
 ## Features
 
-- **Multi-format support**: Parses both checking and credit card statements
+- **Multi-format support**: Parses checking, savings, and credit card statements
+- **Transaction Details PDFs**: Parses "Print Transaction Details" exports from BOA Online Banking
 - **Multi-statement PDFs**: Extracts multiple statements from combined PDF files
 - **Batch directory processing**: Process entire directories of PDFs with `--inputDir`
 - **Smart deduplication**: Statement-level and transaction-level dedup with completeness scoring
@@ -221,6 +222,36 @@ The output conforms to JSON Schema Draft 2020-12. See `schemas/final_result.v1.s
     "warnings": []
   }
 }
+```
+
+## Supported PDF Formats
+
+The parser supports two types of Bank of America PDF documents:
+
+### Monthly Statement PDFs
+
+Traditional monthly bank statements downloaded from BOA Online Banking or received by mail. These contain:
+- Account summary with beginning/ending balances
+- Transaction history organized by type (deposits, withdrawals, checks, fees)
+- Statement period information
+
+### Transaction Details PDFs ("Print Transaction Details")
+
+Web page exports from BOA Online Banking's "Print Transaction Details" feature. These contain:
+- Custom date range transaction history
+- Account activity from the online banking portal
+- Useful for exporting transactions outside of monthly statement periods
+
+**Format characteristics:**
+- Header: `Bank of America | Online Banking | Deposit | Print Transaction Details`
+- Account line: `Adv Plus Banking - 3529 : Account Activity` or `Advantage Savings - 4971 : Account Activity`
+- Date range: `Showing results for "All Transactions, MM/DD/YYYY To MM/DD/YYYY"`
+
+Both formats are automatically detected and can be processed together in batch mode:
+
+```bash
+# Process a directory containing both monthly statements and transaction details PDFs
+pnpm parse-boa --inputDir ./statements --out result.json
 ```
 
 ## Channel Types
@@ -1106,7 +1137,9 @@ pnpm format         # Format with Prettier
   /parsers            # Bank-specific parsers
     /boa              # Bank of America parsers
       checking-parser.ts    # Checking account parsing
+      savings-parser.ts     # Savings account parsing
       credit-parser.ts      # Credit card parsing
+      transaction-details-parser.ts # "Print Transaction Details" PDF parsing
       channel-extractor.ts  # Channel type & bank reference extraction
       merchant-extractor.ts # Merchant info extraction
       line-merger.ts        # Wrapped line handling

@@ -365,4 +365,5 @@ export function parseBoaMultipleStatements(
 export { parseCheckingStatement, parseMultipleCheckingStatements } from './checking-parser.js';
 export { parseSavingsStatement, parseMultipleSavingsStatements } from './savings-parser.js';
 export { parseCreditStatement } from './credit-parser.js';
+export { isTransactionDetailsPDF, parseTransactionDetails } from './transaction-details-parser.js';
 export type { RawTransaction, AccountInfo, BalanceInfo, ParseContext } from './types.js';

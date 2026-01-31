@@ -1,6 +1,9 @@
-import { extractPDF } from '../extractors/index.js';
-import { parseBoaMultipleStatements } from '../parsers/index.js';
-import type { ParsedStatement } from '../schemas/index.js';
+import { extractPDF, type ExtractedPDF } from '../extractors/index.js';
+import { parseBoaMultipleStatements, isTransactionDetailsPDF, parseTransactionDetails, type RawTransaction } from '../parsers/index.js';
+import type { ParsedStatement, Transaction } from '../schemas/index.js';
+import { categorizeTransaction, extractMerchant } from '../categorization/index.js';
+import { parseAmount, roundToTwoDecimals, sumAmounts } from '../utils/money.js';
+import { PARSER_VERSION, BOA_INSTITUTION_NAME } from '../utils/constants.js';
 import type { PdfFileInfo } from '../utils/directory-scanner.js';
 import {
   mergeStatementsWithSources,
@@ -116,7 +119,8 @@ export async function processBatch(
 
 /**
  * Processes a single PDF file and returns its statements.
- * This wraps the existing parser logic.
+ * This wraps the existing parser logic and handles both monthly statements
+ * and "Print Transaction Details" exports.
  */
 async function processSinglePdf(
   filePath: string,
@@ -130,7 +134,12 @@ async function processSinglePdf(
     throw new Error('PDF appears to be password-protected or contains no extractable text');
   }
   
-  // Parse using existing multi-statement parser
+  // Check if this is a "Print Transaction Details" PDF
+  if (isTransactionDetailsPDF(pdf)) {
+    return parseTransactionDetailsPdf(pdf, options);
+  }
+  
+  // Parse using existing multi-statement parser for monthly statements
   const result = parseBoaMultipleStatements(pdf, {
     strict: options.strict ?? false,
     verbose: options.verbose ?? false,
@@ -141,6 +150,89 @@ async function processSinglePdf(
   }
   
   return result.statements;
+}
+
+/**
+ * Parse a "Print Transaction Details" PDF into a single statement.
+ * These PDFs contain a flat list of transactions from online banking export.
+ */
+function parseTransactionDetailsPdf(
+  pdf: ExtractedPDF,
+  _options: BatchProcessOptions
+): ParsedStatement[] {
+  const result = parseTransactionDetails(pdf);
+  
+  if (result.transactions.length === 0) {
+    throw new Error('No transactions found in transaction details PDF');
+  }
+  
+  // Normalize raw transactions to full Transaction objects
+  const transactions: Transaction[] = result.transactions.map((raw: RawTransaction) => {
+    const amount = parseAmount(raw.amount);
+    const absAmount = roundToTwoDecimals(Math.abs(amount));
+    const direction: 'debit' | 'credit' = amount >= 0 ? 'credit' : 'debit';
+    
+    // Categorize based on section or description
+    let categorization;
+    if (raw.section === 'fees') {
+      categorization = { category: 'Fees', subcategory: 'Bank', confidence: 0.95 };
+    } else {
+      categorization = categorizeTransaction(raw.description);
+    }
+    const merchant = extractMerchant(raw.description);
+    
+    return {
+      date: raw.date,
+      postedDate: null,
+      description: raw.description,
+      merchant,
+      amount: direction === 'debit' ? -absAmount : absAmount,
+      direction,
+      category: categorization.category,
+      subcategory: categorization.subcategory,
+      confidence: categorization.confidence,
+      raw: {
+        originalText: raw.originalLine,
+        page: raw.page,
+      },
+    };
+  });
+  
+  // Calculate totals from transactions
+  const totalCredits = sumAmounts(
+    transactions.filter((t) => t.direction === 'credit').map((t) => t.amount)
+  );
+  const totalDebits = sumAmounts(
+    transactions.filter((t) => t.direction === 'debit').map((t) => Math.abs(t.amount))
+  );
+  
+  // Build the statement
+  const statement: ParsedStatement = {
+    account: {
+      institution: BOA_INSTITUTION_NAME,
+      accountType: result.accountInfo.accountType,
+      accountNumberMasked: result.accountInfo.accountNumberMasked,
+      statementPeriod: {
+        start: result.accountInfo.statementPeriodStart,
+        end: result.accountInfo.statementPeriodEnd,
+      },
+      currency: 'USD',
+    },
+    summary: {
+      startingBalance: result.balanceInfo.startingBalance,
+      endingBalance: result.balanceInfo.endingBalance,
+      totalCredits,
+      totalDebits,
+    },
+    transactions,
+    metadata: {
+      parserVersion: PARSER_VERSION,
+      parsedAt: new Date().toISOString(),
+      warnings: result.warnings,
+    },
+  };
+  
+  return [statement];
 }
 
 /**
