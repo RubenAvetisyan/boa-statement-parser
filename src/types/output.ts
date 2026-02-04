@@ -69,6 +69,9 @@ export type SectionType = 'deposits' | 'atm_debit' | 'other_subtractions' | 'che
 
 export type CardNetwork = 'VISA' | 'MASTERCARD' | 'AMEX' | 'DISCOVER' | null;
 
+export type TransactionSource = 'pdf' | 'plaid';
+export type TransactionStatus = 'pending' | 'posted';
+
 export interface StatementFileOutput {
   schemaVersion: '1.0.0';
   source: {
@@ -196,6 +199,21 @@ export interface Transaction {
     isCashWithdrawal?: boolean;
     isCashDeposit?: boolean;
     possibleDuplicate?: boolean;
+  };
+
+  source?: TransactionSource;
+  status?: TransactionStatus;
+
+  plaidMetadata?: {
+    transactionId: string;
+    accountId: string;
+    merchantEntityId?: string;
+    paymentChannel?: string;
+    location?: {
+      city?: string;
+      region?: string;
+      country?: string;
+    };
   };
 }
 

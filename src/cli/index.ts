@@ -27,6 +27,9 @@ import {
   createSupabaseClient,
   importV2Result,
   importParseRun,
+  needsMigration,
+  getMigrationSQL,
+  runAutoMigration,
 } from '../supabase/index.js';
 import { HybridCategorizer, generateTrainingData, generateFromParsedTransactions } from '../categorization/index.js';
 import type { TrainingExample } from '../categorization/index.js';
@@ -125,6 +128,150 @@ program
       }
       process.exit(1);
     }
+  });
+
+// Migrate subcommand
+program
+  .command('migrate')
+  .description('Generate or check Supabase database migrations')
+  .option('--print', 'Print the full migration SQL to stdout')
+  .option('--check', 'Check if migrations are needed')
+  .option('--auto', 'Automatically run migrations (requires SUPABASE_DB_PASSWORD)')
+  .option('--no-rls', 'Exclude RLS policies from output')
+  .option('--no-views', 'Exclude views from output')
+  .option('--supabase-url <url>', 'Supabase project URL', process.env['SUPABASE_URL'])
+  .option('--supabase-key <key>', 'Supabase anon or service role key', process.env['SUPABASE_ANON_KEY'])
+  .option('--db-password <password>', 'Database password for auto-migration', process.env['SUPABASE_DB_PASSWORD'])
+  .option('-v, --verbose', 'Verbose output')
+  .action(async (options: {
+    print?: boolean;
+    check?: boolean;
+    auto?: boolean;
+    rls: boolean;
+    views: boolean;
+    supabaseUrl?: string;
+    supabaseKey?: string;
+    dbPassword?: string;
+    verbose?: boolean;
+  }) => {
+    if (options.print === true) {
+      // Print full migration SQL
+      const sql = getMigrationSQL({
+        includeRls: options.rls,
+        includeViews: options.views,
+      });
+      console.log(sql);
+      return;
+    }
+
+    if (options.auto === true) {
+      // Auto-run migrations via direct PostgreSQL connection
+      const supabaseUrl = options.supabaseUrl ?? process.env['SUPABASE_URL'];
+      const dbPassword = options.dbPassword ?? process.env['SUPABASE_DB_PASSWORD'];
+
+      if (supabaseUrl === undefined || supabaseUrl === '') {
+        console.error('[ERROR] --supabase-url or SUPABASE_URL env var is required');
+        process.exit(1);
+      }
+
+      if (dbPassword === undefined || dbPassword === '') {
+        console.error('[ERROR] --db-password or SUPABASE_DB_PASSWORD env var is required for --auto');
+        console.error('');
+        console.error('Get your database password from:');
+        console.error('  Supabase Dashboard > Settings > Database > Database password');
+        console.error('');
+        console.error('Then add to your .env file:');
+        console.error('  SUPABASE_DB_PASSWORD=your-password-here');
+        process.exit(1);
+      }
+
+      console.error('[INFO] Running auto-migration...');
+
+      const result = await runAutoMigration({
+        supabaseUrl,
+        databasePassword: dbPassword,
+        includeRls: options.rls,
+        includeViews: options.views,
+        verbose: options.verbose ?? false,
+      });
+
+      if (result.success) {
+        console.error('');
+        console.error('=== Migration Summary ===');
+        console.error(`Tables created:   ${result.tablesCreated ? '✓' : '✗'}`);
+        console.error(`Indexes created:  ${result.indexesCreated ? '✓' : '✗'}`);
+        console.error(`RLS enabled:      ${result.rlsEnabled ? '✓' : 'skipped'}`);
+        console.error(`Views created:    ${result.viewsCreated ? '✓' : 'skipped'}`);
+        console.error('=========================');
+        console.error('');
+        console.error('[SUCCESS] Migration completed! You can now use --upload.');
+        process.exit(0);
+      } else {
+        console.error('[ERROR] Migration failed:');
+        for (const err of result.errors) {
+          console.error(`  - ${err}`);
+        }
+        process.exit(1);
+      }
+    }
+
+    if (options.check === true) {
+      // Check if migrations are needed
+      const supabaseUrl = options.supabaseUrl ?? process.env['SUPABASE_URL'];
+      // Use service role key to bypass RLS for checking tables
+      const serviceRoleKey = process.env['SUPABASE_SERVICE_ROLE_KEY'];
+      const anonKey = options.supabaseKey ?? process.env['SUPABASE_ANON_KEY'];
+
+      if (supabaseUrl === undefined || supabaseUrl === '') {
+        console.error('[ERROR] --supabase-url or SUPABASE_URL env var is required');
+        process.exit(1);
+      }
+
+      if ((serviceRoleKey === undefined || serviceRoleKey === '') && (anonKey === undefined || anonKey === '')) {
+        console.error('[ERROR] SUPABASE_SERVICE_ROLE_KEY or SUPABASE_ANON_KEY env var is required');
+        process.exit(1);
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      const client = createSupabaseClient({
+        url: supabaseUrl,
+        anonKey: anonKey ?? '',
+        serviceRoleKey,
+      });
+
+      // Import checkExistingTables for verbose output
+      const { checkExistingTables } = await import('../supabase/migrations.js');
+      
+      if (options.verbose === true) {
+        console.error('[DEBUG] Checking tables with verbose mode...');
+      }
+      
+      const { existing, missing } = await checkExistingTables(client, options.verbose === true);
+      
+      if (missing.length > 0) {
+        console.error('[INFO] Database tables are missing. Migration is needed.');
+        console.error(`[INFO] Missing tables: ${missing.join(', ')}`);
+        if (existing.length > 0) {
+          console.error(`[INFO] Existing tables: ${existing.join(', ')}`);
+        }
+        console.error('[INFO] Run: pnpm parse-boa migrate --auto');
+        process.exit(1);
+      } else {
+        console.error('[INFO] All database tables exist. No migration needed.');
+        process.exit(0);
+      }
+    }
+
+    // Default: show help
+    console.error('Usage: pnpm parse-boa migrate [options]');
+    console.error('');
+    console.error('Options:');
+    console.error('  --print        Print the full migration SQL to stdout');
+    console.error('  --check        Check if migrations are needed');
+    console.error('  --auto         Automatically run migrations (requires SUPABASE_DB_PASSWORD)');
+    console.error('  --no-rls       Exclude RLS policies from output');
+    console.error('  --no-views     Exclude views from output');
+    console.error('  -v, --verbose  Verbose output');
   });
 
 interface CliOptions {
@@ -449,6 +596,22 @@ async function uploadToSupabase(
       url: supabaseUrl,
       anonKey: supabaseKey,
     });
+
+    // Check if database tables exist
+    const migrationNeeded = await needsMigration(client);
+    if (migrationNeeded) {
+      console.error('[ERROR] Supabase database tables not found.');
+      console.error('');
+      console.error('Please run the schema migrations in Supabase Dashboard > SQL Editor.');
+      console.error('You can find the SQL files at:');
+      console.error('  .windsurf/skills/supabase-bank-ledger-schema/references/schema.sql');
+      console.error('  .windsurf/skills/supabase-bank-ledger-schema/references/rls-policies.sql');
+      console.error('  .windsurf/skills/supabase-bank-ledger-schema/references/views.sql');
+      console.error('');
+      console.error('Or generate the full migration SQL with:');
+      console.error('  pnpm parse-boa migrate --print');
+      process.exit(1);
+    }
 
     // Convert to v2 format for import
     const v2Output = toFinalResultV2(canonical);
@@ -990,5 +1153,405 @@ BOA_ML=true
 TF_CPP_MIN_LOG_LEVEL=2
 `;
 }
+
+// Plaid subcommand
+program
+  .command('plaid')
+  .description('Plaid API integration commands')
+  .argument('<action>', 'Action: link, list, status, sync, remove, reconcile, identity, auth, liabilities, holdings, test')
+  .option('--item-id <id>', 'Plaid item ID')
+  .option('--user-id <id>', 'User ID for Plaid operations', process.env['BOA_USER_ID'])
+  .option('--full', 'Full sync (ignore cursor)')
+  .option('-v, --verbose', 'Verbose output')
+  .action(async (action: string, options: {
+    itemId?: string;
+    userId?: string;
+    full?: boolean;
+    verbose?: boolean;
+  }) => {
+    const {
+      isPlaidConfigured,
+      testPlaidConnection,
+      createSandboxPublicToken,
+      exchangePublicToken,
+      getItem,
+      removeItem,
+      syncItemTransactions,
+      getAccounts,
+      getFilePlaidItemStore,
+    } = await import('../plaid/index.js');
+
+    // Use file-based store for CLI persistence
+    const store = getFilePlaidItemStore();
+
+    if (!isPlaidConfigured()) {
+      console.error('[ERROR] Plaid is not configured.');
+      console.error('');
+      console.error('Please set the following environment variables:');
+      console.error('  PLAID_CLIENT_ID=your-client-id');
+      console.error('  PLAID_SECRET=your-secret');
+      console.error('  PLAID_ENV=sandbox (or production)');
+      console.error('');
+      console.error('Get these from: https://dashboard.plaid.com/team/keys');
+      process.exit(1);
+    }
+
+    try {
+      switch (action) {
+        case 'test': {
+          console.error('[INFO] Testing Plaid connection...');
+          const result = await testPlaidConnection();
+          if (result.success) {
+            console.error(`[SUCCESS] Connected to Plaid (${result.environment})`);
+          } else {
+            console.error(`[ERROR] Connection failed: ${result.error}`);
+            process.exit(1);
+          }
+          break;
+        }
+
+        case 'link': {
+          if (options.userId === undefined || options.userId === '') {
+            console.error('[ERROR] --user-id is required for link');
+            process.exit(1);
+          }
+
+          console.error('[INFO] Creating sandbox public token for testing...');
+          const { publicToken } = await createSandboxPublicToken();
+          console.error(`[INFO] Public token: ${publicToken.slice(0, 20)}...`);
+
+          console.error('[INFO] Exchanging for access token...');
+          const exchangeResult = await exchangePublicToken(publicToken);
+          console.error(`[SUCCESS] Item linked: ${exchangeResult.itemId}`);
+
+          // Get item details
+          const itemInfo = await getItem(exchangeResult.accessToken);
+          console.error(`[INFO] Institution: ${itemInfo.institutionId}`);
+
+          // Get accounts
+          const accounts = await getAccounts(exchangeResult.accessToken);
+          console.error(`[INFO] Accounts: ${accounts.length}`);
+          for (const acc of accounts) {
+            console.error(`  - ${acc.name} (${acc.type}/${acc.subtype ?? 'N/A'}) ****${acc.mask ?? '????'}`);
+          }
+
+          // Save to file store for persistence
+          await store.saveItem({
+            itemId: exchangeResult.itemId,
+            accessToken: exchangeResult.accessToken,
+            institutionId: itemInfo.institutionId ?? 'unknown',
+            institutionName: 'Sandbox Bank',
+            userId: options.userId,
+            status: 'active',
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
+
+          console.error('');
+          console.error('=== Link Complete ===');
+          console.error(`Item ID: ${exchangeResult.itemId}`);
+          console.error(`Stored at: ${store.getFilePath()}`);
+          console.error('');
+          console.error('Next steps:');
+          console.error('  pnpm parse-boa plaid list              # List all linked items');
+          console.error('  pnpm parse-boa plaid sync --item-id <id>  # Sync transactions');
+          break;
+        }
+
+        case 'list': {
+          const items = await store.getAllItems();
+          if (items.length === 0) {
+            console.error('[INFO] No Plaid items linked yet.');
+            console.error('Use: pnpm parse-boa plaid link');
+          } else {
+            console.error('');
+            console.error('=== Linked Plaid Items ===');
+            for (const item of items) {
+              console.error(``);
+              console.error(`  Item ID:     ${item.itemId}`);
+              console.error(`  Institution: ${item.institutionName}`);
+              console.error(`  Status:      ${item.status}`);
+              console.error(`  Last Sync:   ${item.lastSyncAt ?? 'Never'}`);
+            }
+            console.error('');
+            console.error(`Store file: ${store.getFilePath()}`);
+          }
+          break;
+        }
+
+        case 'status': {
+          if (options.itemId === undefined || options.itemId === '') {
+            console.error('[ERROR] --item-id is required for status');
+            console.error('Use: pnpm parse-boa plaid list  to see available items');
+            process.exit(1);
+          }
+
+          const item = await store.getItem(options.itemId);
+
+          if (item === null) {
+            console.error(`[ERROR] Item not found: ${options.itemId}`);
+            process.exit(1);
+          }
+
+          const itemInfo = await getItem(item.accessToken);
+
+          console.error('');
+          console.error('=== Item Status ===');
+          console.error(`Item ID:      ${item.itemId}`);
+          console.error(`Institution:  ${item.institutionName}`);
+          console.error(`Status:       ${item.status}`);
+          console.error(`Last Sync:    ${item.lastSyncAt ?? 'Never'}`);
+          console.error(`Cursor:       ${item.syncCursor !== undefined ? 'Set' : 'Not set'}`);
+          console.error(`Update Type:  ${itemInfo.updateType}`);
+          if (itemInfo.error !== null) {
+            console.error(`Error:        ${itemInfo.error.errorMessage}`);
+          }
+          break;
+        }
+
+        case 'sync': {
+          if (options.itemId === undefined || options.itemId === '') {
+            console.error('[ERROR] --item-id is required for sync');
+            process.exit(1);
+          }
+
+          console.error(`[INFO] Syncing transactions for item: ${options.itemId}`);
+
+          if (options.full === true) {
+            await store.updateSyncCursor(options.itemId, '');
+            console.error('[INFO] Full sync requested, cursor reset');
+          }
+
+          const result = await syncItemTransactions(
+            options.itemId,
+            (batch) => {
+              if (options.verbose === true) {
+                console.error(`[INFO] Batch: +${batch.added.length} added, ~${batch.modified.length} modified, -${batch.removed.length} removed`);
+              }
+            },
+            store
+          );
+
+          console.error('');
+          console.error('=== Sync Complete ===');
+          console.error(`Added:    ${result.added.length}`);
+          console.error(`Modified: ${result.modified.length}`);
+          console.error(`Removed:  ${result.removed.length}`);
+
+          // Output transactions as JSON
+          if (result.added.length > 0) {
+            console.log(JSON.stringify(result.added, null, 2));
+          }
+          break;
+        }
+
+        case 'remove': {
+          if (options.itemId === undefined || options.itemId === '') {
+            console.error('[ERROR] --item-id is required for remove');
+            console.error('Use: pnpm parse-boa plaid list  to see available items');
+            process.exit(1);
+          }
+
+          const removeItemData = await store.getItem(options.itemId);
+
+          if (removeItemData === null) {
+            console.error(`[ERROR] Item not found: ${options.itemId}`);
+            process.exit(1);
+          }
+
+          console.error(`[INFO] Removing item: ${options.itemId}`);
+          await removeItem(removeItemData.accessToken);
+          await store.deleteItem(options.itemId);
+
+          console.error('[SUCCESS] Item removed');
+          break;
+        }
+
+        case 'reconcile': {
+          if (options.itemId === undefined || options.itemId === '') {
+            console.error('[ERROR] --item-id is required for reconcile');
+            console.error('Use: pnpm parse-boa plaid list  to see available items');
+            process.exit(1);
+          }
+
+          // Import reconciliation and parsing modules
+          const { reconcileTransactions, formatReconciliationReport } = await import('../plaid/reconcile.js');
+          const { parseBoaMultipleStatements } = await import('../parsers/boa/index.js');
+          const { extractPDF } = await import('../extractors/index.js');
+          const fs = await import('fs');
+          const path = await import('path');
+
+          // Get PDF file from remaining args or prompt
+          const pdfArg = process.argv.find((arg) => arg.endsWith('.pdf'));
+          if (pdfArg === undefined) {
+            console.error('[ERROR] PDF file path required for reconcile');
+            console.error('Usage: pnpm parse-boa plaid reconcile --item-id <id> <path/to/statement.pdf>');
+            process.exit(1);
+          }
+
+          const pdfPath = path.resolve(pdfArg);
+          if (!fs.existsSync(pdfPath)) {
+            console.error(`[ERROR] PDF file not found: ${pdfPath}`);
+            process.exit(1);
+          }
+
+          console.error(`[INFO] Loading PDF: ${pdfPath}`);
+          const pdfData = await extractPDF(pdfPath);
+          const parseResult = parseBoaMultipleStatements(pdfData);
+
+          if (parseResult.statements.length === 0) {
+            console.error('[ERROR] No statements found in PDF');
+            process.exit(1);
+          }
+
+          // Get all transactions from PDF
+          const pdfTransactions = parseResult.statements.flatMap((s) => s.transactions);
+          console.error(`[INFO] Found ${pdfTransactions.length} PDF transactions`);
+
+          // Get Plaid transactions
+          const item = await store.getItem(options.itemId);
+          if (item === null) {
+            console.error(`[ERROR] Item not found: ${options.itemId}`);
+            process.exit(1);
+          }
+
+          console.error(`[INFO] Syncing Plaid transactions...`);
+          const syncResult = await syncItemTransactions(options.itemId, undefined, store);
+          const plaidTransactions = syncResult.added;
+          console.error(`[INFO] Found ${plaidTransactions.length} Plaid transactions`);
+
+          // Reconcile
+          console.error('[INFO] Reconciling transactions...');
+          const reconcileResult = reconcileTransactions(pdfTransactions, plaidTransactions);
+
+          // Output report
+          const report = formatReconciliationReport(reconcileResult);
+          console.error('');
+          console.error(report);
+
+          // Output JSON to stdout
+          console.log(JSON.stringify(reconcileResult, null, 2));
+          break;
+        }
+
+        case 'identity': {
+          if (options.itemId === undefined || options.itemId === '') {
+            console.error('[ERROR] --item-id is required for identity');
+            console.error('Use: pnpm parse-boa plaid list  to see available items');
+            process.exit(1);
+          }
+
+          const { getIdentity, formatIdentityReport } = await import('../plaid/identity.js');
+
+          const identityItem = await store.getItem(options.itemId);
+          if (identityItem === null) {
+            console.error(`[ERROR] Item not found: ${options.itemId}`);
+            process.exit(1);
+          }
+
+          console.error('[INFO] Fetching identity information...');
+          const identityResult = await getIdentity(identityItem.accessToken);
+
+          const identityReport = formatIdentityReport(identityResult);
+          console.error('');
+          console.error(identityReport);
+
+          console.log(JSON.stringify(identityResult, null, 2));
+          break;
+        }
+
+        case 'auth': {
+          if (options.itemId === undefined || options.itemId === '') {
+            console.error('[ERROR] --item-id is required for auth');
+            console.error('Use: pnpm parse-boa plaid list  to see available items');
+            process.exit(1);
+          }
+
+          const { getAuth, formatAuthReport } = await import('../plaid/auth.js');
+
+          const authItem = await store.getItem(options.itemId);
+          if (authItem === null) {
+            console.error(`[ERROR] Item not found: ${options.itemId}`);
+            process.exit(1);
+          }
+
+          console.error('[INFO] Fetching auth information (account/routing numbers)...');
+          console.error('[WARN] This contains sensitive data - handle with care!');
+          const authResult = await getAuth(authItem.accessToken);
+
+          const authReport = formatAuthReport(authResult, true); // masked by default
+          console.error('');
+          console.error(authReport);
+
+          console.log(JSON.stringify(authResult, null, 2));
+          break;
+        }
+
+        case 'liabilities': {
+          if (options.itemId === undefined || options.itemId === '') {
+            console.error('[ERROR] --item-id is required for liabilities');
+            console.error('Use: pnpm parse-boa plaid list  to see available items');
+            process.exit(1);
+          }
+
+          const { getLiabilities, formatLiabilitiesReport } = await import('../plaid/liabilities.js');
+
+          const liabilitiesItem = await store.getItem(options.itemId);
+          if (liabilitiesItem === null) {
+            console.error(`[ERROR] Item not found: ${options.itemId}`);
+            process.exit(1);
+          }
+
+          console.error('[INFO] Fetching liabilities information...');
+          const liabilitiesResult = await getLiabilities(liabilitiesItem.accessToken);
+
+          const liabilitiesReport = formatLiabilitiesReport(liabilitiesResult);
+          console.error('');
+          console.error(liabilitiesReport);
+
+          console.log(JSON.stringify(liabilitiesResult, null, 2));
+          break;
+        }
+
+        case 'holdings': {
+          if (options.itemId === undefined || options.itemId === '') {
+            console.error('[ERROR] --item-id is required for holdings');
+            console.error('Use: pnpm parse-boa plaid list  to see available items');
+            process.exit(1);
+          }
+
+          const { getHoldings, formatHoldingsReport } = await import('../plaid/investments.js');
+
+          const holdingsItem = await store.getItem(options.itemId);
+          if (holdingsItem === null) {
+            console.error(`[ERROR] Item not found: ${options.itemId}`);
+            process.exit(1);
+          }
+
+          console.error('[INFO] Fetching investment holdings...');
+          const holdingsResult = await getHoldings(holdingsItem.accessToken);
+
+          const holdingsReport = formatHoldingsReport(holdingsResult);
+          console.error('');
+          console.error(holdingsReport);
+
+          console.log(JSON.stringify(holdingsResult, null, 2));
+          break;
+        }
+
+        default:
+          console.error(`[ERROR] Unknown action: ${action}`);
+          console.error('Valid actions: link, list, status, sync, remove, reconcile, identity, auth, liabilities, holdings, test');
+          process.exit(1);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[ERROR] ${message}`);
+      if (options.verbose === true && error instanceof Error && error.stack !== undefined) {
+        console.error(error.stack);
+      }
+      process.exit(1);
+    }
+  });
 
 program.parse();

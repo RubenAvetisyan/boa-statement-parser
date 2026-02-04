@@ -85,3 +85,17 @@ export {
   type SetTransactionOverrideInput,
   type TransactionOverrideRow,
 } from './overrides.js';
+
+// Migration functions
+export {
+  checkExistingTables,
+  needsMigration,
+  runMigrations,
+  getMigrationSQL,
+  exportMigrationSQL,
+  runAutoMigration,
+  canAutoMigrate,
+  type MigrationResult,
+  type AutoMigrationConfig,
+  type AutoMigrationResult,
+} from './migrations.js';
