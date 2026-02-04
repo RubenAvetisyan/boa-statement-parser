@@ -23,6 +23,11 @@ type OutputFormat = typeof AVAILABLE_FORMATS[number];
 import { PARSER_VERSION } from '../utils/constants.js';
 import { scanDirectoryForPdfs, validateDirectory } from '../utils/directory-scanner.js';
 import { processBatch, type ParseError } from '../batch/index.js';
+import {
+  createSupabaseClient,
+  importV2Result,
+  importParseRun,
+} from '../supabase/index.js';
 import { HybridCategorizer, generateTrainingData, generateFromParsedTransactions } from '../categorization/index.js';
 import type { TrainingExample } from '../categorization/index.js';
 
@@ -69,6 +74,10 @@ program
   .option('--model-out <path>', 'Output path for trained ML model', process.env['BOA_MODEL_OUT'])
   .option('--epochs <number>', 'Number of training epochs', process.env['BOA_EPOCHS'] ?? '50')
   .option('--detect-recurring', 'Detect recurring transactions and include in output', envBool('BOA_DETECT_RECURRING', false))
+  .option('--upload', 'Upload parsed results to Supabase database', envBool('BOA_UPLOAD', false))
+  .option('--supabase-url <url>', 'Supabase project URL', process.env['SUPABASE_URL'])
+  .option('--supabase-key <key>', 'Supabase anon or service role key', process.env['SUPABASE_ANON_KEY'])
+  .option('--user-id <id>', 'User ID for Supabase RLS (required for --upload)', process.env['BOA_USER_ID'])
   .action(async (pdfFile: string | undefined, options: {
     inputDir?: string;
     out?: string;
@@ -85,6 +94,10 @@ program
     modelOut?: string;
     epochs: string;
     detectRecurring: boolean;
+    upload: boolean;
+    supabaseUrl?: string;
+    supabaseKey?: string;
+    userId?: string;
   }) => {
     try {
       // ML Training mode
@@ -130,6 +143,10 @@ interface CliOptions {
   modelOut?: string;
   epochs: string;
   detectRecurring: boolean;
+  upload: boolean;
+  supabaseUrl?: string;
+  supabaseKey?: string;
+  userId?: string;
 }
 
 /**
@@ -382,12 +399,95 @@ async function processDirectory(inputDir: string, options: CliOptions): Promise<
     }
   }
   
+  // Upload to Supabase if requested
+  if (options.upload) {
+    await uploadToSupabase(canonical, schemaVersion, options);
+  }
+  
   // Exit with error if ALL PDFs failed
   if (result.summary.pdfsSucceeded === 0) {
     process.exit(1);
   }
   
   process.exit(0);
+}
+
+/**
+ * Upload parsed results to Supabase.
+ */
+async function uploadToSupabase(
+  canonical: CanonicalOutput,
+  schemaVersion: string,
+  options: CliOptions
+): Promise<void> {
+  // Validate required options
+  if (options.userId === undefined || options.userId === '') {
+    console.error('[ERROR] --user-id is required for --upload');
+    process.exit(1);
+  }
+
+  const supabaseUrl = options.supabaseUrl ?? process.env['SUPABASE_URL'];
+  const supabaseKey = options.supabaseKey ?? process.env['SUPABASE_ANON_KEY'];
+
+  if (supabaseUrl === undefined || supabaseUrl === '') {
+    console.error('[ERROR] --supabase-url or SUPABASE_URL env var is required for --upload');
+    process.exit(1);
+  }
+
+  if (supabaseKey === undefined || supabaseKey === '') {
+    console.error('[ERROR] --supabase-key or SUPABASE_ANON_KEY env var is required for --upload');
+    process.exit(1);
+  }
+
+  if (options.verbose) {
+    console.error('[INFO] Uploading to Supabase...');
+  }
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+    const client = createSupabaseClient({
+      url: supabaseUrl,
+      anonKey: supabaseKey,
+    });
+
+    // Convert to v2 format for import
+    const v2Output = toFinalResultV2(canonical);
+
+    // Create parse run record
+    const parseRunResult = await importParseRun(client, options.userId, {
+      schemaVersion,
+      status: 'success',
+      warnings: canonical.statements.flatMap((s) => s.metadata.warnings),
+      outputSnapshot: v2Output,
+    });
+
+    if (options.verbose) {
+      console.error(`[INFO] Created parse run: ${parseRunResult.parseRunId}`);
+    }
+
+    // Import the v2 result
+    const importResult = await importV2Result(client, options.userId, {
+      result: v2Output,
+      parseRunId: parseRunResult.parseRunId,
+    });
+
+    console.error('');
+    console.error('=== Supabase Upload Summary ===');
+    console.error(`Accounts created:       ${importResult.accountsCreated}`);
+    console.error(`Accounts existing:      ${importResult.accountsExisting}`);
+    console.error(`Statements created:     ${importResult.statementsCreated}`);
+    console.error(`Statements updated:     ${importResult.statementsUpdated}`);
+    console.error(`Transactions inserted:  ${importResult.transactionsInserted}`);
+    console.error(`Transactions skipped:   ${importResult.transactionsSkipped}`);
+    console.error('===============================');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[ERROR] Supabase upload failed: ${message}`);
+    if (options.verbose && error instanceof Error && error.stack !== undefined) {
+      console.error(error.stack);
+    }
+    process.exit(1);
+  }
 }
 
 /**
@@ -613,6 +713,13 @@ async function processSingleFile(pdfFile: string, options: CliOptions): Promise<
   } else {
     // eslint-disable-next-line no-console
     console.log(outputContent);
+  }
+
+  // Upload to Supabase if requested (only for multi-statement mode)
+  if (options.upload && !options.single && canonical !== null) {
+    await uploadToSupabase(canonical, schemaVersion, options);
+  } else if (options.upload && options.single) {
+    console.error('[WARN] --upload requires multi-statement mode. Remove --single flag to enable upload.');
   }
 
   process.exit(0);
