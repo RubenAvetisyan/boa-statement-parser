@@ -16,7 +16,7 @@ import {
   validateOutputOrThrow,
   AVAILABLE_SCHEMA_VERSIONS,
 } from '../schemas/schema-registry.js';
-import { toFinalResult, toFinalResultV2, exportOfx, exportOfxByAccount, exportCsv, exportCsvByAccount, detectRecurringFromStatements, type CanonicalOutput } from '../output/index.js';
+import { toFinalResult, toFinalResultV2, exportOfx, exportOfxByAccount, exportCsv, exportCsvByAccount, detectRecurringFromStatements, enrichWithPlaid, type CanonicalOutput, type MergeStrategy } from '../output/index.js';
 
 const AVAILABLE_FORMATS = ['json', 'ofx', 'csv'] as const;
 type OutputFormat = typeof AVAILABLE_FORMATS[number];
@@ -77,6 +77,9 @@ program
   .option('--model-out <path>', 'Output path for trained ML model', process.env['BOA_MODEL_OUT'])
   .option('--epochs <number>', 'Number of training epochs', process.env['BOA_EPOCHS'] ?? '50')
   .option('--detect-recurring', 'Detect recurring transactions and include in output', envBool('BOA_DETECT_RECURRING', false))
+  .option('--plaid', 'Enrich output with Plaid transaction data', envBool('BOA_PLAID', false))
+  .option('--plaid-item-id <id>', 'Plaid item ID for enrichment', process.env['BOA_PLAID_ITEM_ID'])
+  .option('--merge-strategy <strategy>', 'Merge strategy: pdf-primary, plaid-primary, union', process.env['BOA_MERGE_STRATEGY'] ?? 'pdf-primary')
   .option('--upload', 'Upload parsed results to Supabase database', envBool('BOA_UPLOAD', false))
   .option('--supabase-url <url>', 'Supabase project URL', process.env['SUPABASE_URL'])
   .option('--supabase-key <key>', 'Supabase anon or service role key', process.env['SUPABASE_ANON_KEY'])
@@ -97,6 +100,9 @@ program
     modelOut?: string;
     epochs: string;
     detectRecurring: boolean;
+    plaid: boolean;
+    plaidItemId?: string;
+    mergeStrategy: string;
     upload: boolean;
     supabaseUrl?: string;
     supabaseKey?: string;
@@ -290,6 +296,9 @@ interface CliOptions {
   modelOut?: string;
   epochs: string;
   detectRecurring: boolean;
+  plaid: boolean;
+  plaidItemId?: string;
+  mergeStrategy: string;
   upload: boolean;
   supabaseUrl?: string;
   supabaseKey?: string;
@@ -531,6 +540,11 @@ async function processDirectory(inputDir: string, options: CliOptions): Promise<
         recurring: recurringResult,
       };
     }
+
+    // Add Plaid enrichment if enabled
+    if (options.plaid) {
+      finalOutput = await enrichOutputWithPlaid(finalOutput, canonical, options);
+    }
     
     const outputContent = options.pretty
       ? JSON.stringify(finalOutput, null, 2)
@@ -651,6 +665,119 @@ async function uploadToSupabase(
     }
     process.exit(1);
   }
+}
+
+/**
+ * Enrich output with Plaid transaction data.
+ */
+async function enrichOutputWithPlaid(
+  output: unknown,
+  canonical: CanonicalOutput,
+  options: CliOptions
+): Promise<unknown> {
+  const {
+    isPlaidConfigured,
+    getFilePlaidItemStore,
+    syncItemTransactions,
+    getAccounts,
+  } = await import('../plaid/index.js');
+
+  if (!isPlaidConfigured()) {
+    console.error('[WARN] Plaid is not configured. Skipping enrichment.');
+    console.error('       Set PLAID_CLIENT_ID, PLAID_SECRET, and PLAID_ENV environment variables.');
+    return output;
+  }
+
+  const store = getFilePlaidItemStore();
+
+  // Determine which item to use
+  let itemId = options.plaidItemId;
+
+  if (itemId === undefined || itemId === '') {
+    // Try to get the first available item
+    const items = await store.getAllItems();
+    if (items.length === 0) {
+      console.error('[WARN] No Plaid items linked. Skipping enrichment.');
+      console.error('       Use: pnpm parse-boa plaid link --user-id <id>');
+      return output;
+    }
+    const firstItem = items[0];
+    if (firstItem === undefined) {
+      console.error('[WARN] No Plaid items available. Skipping enrichment.');
+      return output;
+    }
+    itemId = firstItem.itemId;
+    if (options.verbose) {
+      console.error(`[INFO] Using Plaid item: ${itemId} (${firstItem.institutionName})`);
+    }
+  }
+
+  const item = await store.getItem(itemId);
+  if (item === null) {
+    console.error(`[WARN] Plaid item not found: ${itemId}. Skipping enrichment.`);
+    return output;
+  }
+
+  if (options.verbose) {
+    console.error(`[INFO] Enriching with Plaid data from: ${item.institutionName}`);
+    console.error(`[INFO] Merge strategy: ${options.mergeStrategy}`);
+  }
+
+  // Reset cursor to get all transactions (full sync for enrichment)
+  await store.updateSyncCursor(itemId, '');
+  
+  // Sync transactions from Plaid
+  console.error('[INFO] Syncing Plaid transactions (full sync for enrichment)...');
+  const syncResult = await syncItemTransactions(itemId, undefined, store);
+  const plaidTransactions = syncResult.added;
+
+  if (options.verbose) {
+    console.error(`[INFO] Plaid transactions: ${plaidTransactions.length}`);
+  }
+
+  // Get accounts for metadata
+  const accounts = await getAccounts(item.accessToken);
+
+  // Convert to v2 format for enrichment
+  const v2Output = toFinalResultV2(canonical);
+
+  // Enrich with Plaid data
+  const mergeStrategy = options.mergeStrategy as MergeStrategy;
+  const enrichResult = enrichWithPlaid(
+    v2Output,
+    plaidTransactions,
+    accounts,
+    item,
+    {
+      mergeStrategy,
+      pdfFiles: canonical.statements.map((s) => `${s.account.accountType}-${s.account.statementPeriod.start}-${s.account.statementPeriod.end}`),
+      parseDate: new Date().toISOString(),
+    }
+  );
+
+  // Log enrichment results
+  console.error('');
+  console.error('=== Plaid Enrichment Summary ===');
+  console.error(`Matched:          ${enrichResult.reconciliation.matched}`);
+  console.error(`Unmatched (PDF):  ${enrichResult.reconciliation.unmatchedPdf}`);
+  console.error(`Unmatched (Plaid): ${enrichResult.reconciliation.unmatchedPlaid}`);
+  console.error(`Match Rate:       ${(enrichResult.reconciliation.matchRate * 100).toFixed(1)}%`);
+  console.error('================================');
+
+  if (enrichResult.warnings.length > 0) {
+    for (const warning of enrichResult.warnings) {
+      console.error(`[WARN] ${warning}`);
+    }
+  }
+
+  // Merge enriched output with any existing properties (like recurring)
+  return {
+    ...(output as object),
+    dataSources: enrichResult.enrichedOutput.dataSources,
+    reconciliation: enrichResult.enrichedOutput.reconciliation,
+    accounts: enrichResult.enrichedOutput.accounts,
+    totalTransactions: enrichResult.enrichedOutput.totalTransactions,
+  };
 }
 
 /**
@@ -860,6 +987,13 @@ async function processSingleFile(pdfFile: string, options: CliOptions): Promise<
         ...(output as object),
         recurring: recurringResult,
       };
+    }
+
+    // Add Plaid enrichment if enabled (only for multi-statement mode)
+    if (options.plaid && !options.single && canonical !== null) {
+      finalOutput = await enrichOutputWithPlaid(finalOutput, canonical, options);
+    } else if (options.plaid && options.single) {
+      console.error('[WARN] --plaid requires multi-statement mode. Remove --single flag to enable Plaid enrichment.');
     }
     
     outputContent = options.pretty
@@ -1158,14 +1292,18 @@ TF_CPP_MIN_LOG_LEVEL=2
 program
   .command('plaid')
   .description('Plaid API integration commands')
-  .argument('<action>', 'Action: link, list, status, sync, remove, reconcile, identity, auth, liabilities, holdings, test')
+  .argument('<action>', 'Action: link, list, status, sync, sync-all, remove, reconcile, merge, identity, auth, liabilities, holdings, test')
   .option('--item-id <id>', 'Plaid item ID')
   .option('--user-id <id>', 'User ID for Plaid operations', process.env['BOA_USER_ID'])
+  .option('--username <name>', 'Sandbox username for custom test data (e.g. custom_boa)', process.env['PLAID_SANDBOX_USERNAME'])
+  .option('--institution <id>', 'Institution ID to pre-select (e.g. ins_4 for Bank of America)')
   .option('--full', 'Full sync (ignore cursor)')
   .option('-v, --verbose', 'Verbose output')
   .action(async (action: string, options: {
     itemId?: string;
     userId?: string;
+    username?: string;
+    institution?: string;
     full?: boolean;
     verbose?: boolean;
   }) => {
@@ -1179,6 +1317,8 @@ program
       syncItemTransactions,
       getAccounts,
       getFilePlaidItemStore,
+      getPlaidConfig,
+      startLinkServer,
     } = await import('../plaid/index.js');
 
     // Use file-based store for CLI persistence
@@ -1216,45 +1356,107 @@ program
             process.exit(1);
           }
 
-          console.error('[INFO] Creating sandbox public token for testing...');
-          const { publicToken } = await createSandboxPublicToken();
-          console.error(`[INFO] Public token: ${publicToken.slice(0, 20)}...`);
+          const plaidConfig = getPlaidConfig();
 
-          console.error('[INFO] Exchanging for access token...');
-          const exchangeResult = await exchangePublicToken(publicToken);
-          console.error(`[SUCCESS] Item linked: ${exchangeResult.itemId}`);
+          if (plaidConfig.env === 'production') {
+            // Production: browser-based Plaid Link OAuth flow
+            console.error('[INFO] Production mode — launching browser-based Plaid Link...');
+            console.error('[INFO] Bank of America uses OAuth, so you will be redirected to BOA\'s login page.');
+            console.error('');
 
-          // Get item details
-          const itemInfo = await getItem(exchangeResult.accessToken);
-          console.error(`[INFO] Institution: ${itemInfo.institutionId}`);
+            const linkResult = await startLinkServer({
+              userId: options.userId,
+              institutionId: options.institution,
+            });
 
-          // Get accounts
-          const accounts = await getAccounts(exchangeResult.accessToken);
-          console.error(`[INFO] Accounts: ${accounts.length}`);
-          for (const acc of accounts) {
-            console.error(`  - ${acc.name} (${acc.type}/${acc.subtype ?? 'N/A'}) ****${acc.mask ?? '????'}`);
+            console.error(`[INFO] Accounts: ${linkResult.accounts.length}`);
+            for (const acc of linkResult.accounts) {
+              console.error(`  - ${acc.name} (${acc.type}/${acc.subtype ?? 'N/A'}) ****${acc.mask ?? '????'}`);
+            }
+
+            // Resolve institution name
+            let institutionName = 'Unknown';
+            if (linkResult.institutionId !== null) {
+              try {
+                const { getInstitution } = await import('../plaid/index.js');
+                const inst = await getInstitution(linkResult.institutionId);
+                institutionName = inst.name;
+              } catch {
+                institutionName = linkResult.institutionId;
+              }
+            }
+
+            // Save to file store for persistence
+            await store.saveItem({
+              itemId: linkResult.itemId,
+              accessToken: linkResult.accessToken,
+              institutionId: linkResult.institutionId ?? 'unknown',
+              institutionName,
+              userId: options.userId,
+              status: 'active',
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            });
+
+            console.error('');
+            console.error('=== Link Complete ===');
+            console.error(`Item ID: ${linkResult.itemId}`);
+            console.error(`Institution: ${institutionName}`);
+            console.error(`Stored at: ${store.getFilePath()}`);
+            console.error('');
+            console.error('Next steps:');
+            console.error('  pnpm parse-boa plaid list              # List all linked items');
+            console.error('  pnpm parse-boa plaid sync --item-id <id>  # Sync transactions');
+          } else {
+            // Sandbox: programmatic token creation
+            if (options.username !== undefined) {
+              console.error(`[INFO] Creating sandbox public token with custom user: ${options.username}`);
+            } else {
+              console.error('[INFO] Creating sandbox public token for testing...');
+            }
+            const { publicToken } = await createSandboxPublicToken(
+              undefined,
+              undefined,
+              options.username
+            );
+            console.error(`[INFO] Public token: ${publicToken.slice(0, 20)}...`);
+
+            console.error('[INFO] Exchanging for access token...');
+            const exchangeResult = await exchangePublicToken(publicToken);
+            console.error(`[SUCCESS] Item linked: ${exchangeResult.itemId}`);
+
+            // Get item details
+            const itemInfo = await getItem(exchangeResult.accessToken);
+            console.error(`[INFO] Institution: ${itemInfo.institutionId}`);
+
+            // Get accounts
+            const accounts = await getAccounts(exchangeResult.accessToken);
+            console.error(`[INFO] Accounts: ${accounts.length}`);
+            for (const acc of accounts) {
+              console.error(`  - ${acc.name} (${acc.type}/${acc.subtype ?? 'N/A'}) ****${acc.mask ?? '????'}`);
+            }
+
+            // Save to file store for persistence
+            await store.saveItem({
+              itemId: exchangeResult.itemId,
+              accessToken: exchangeResult.accessToken,
+              institutionId: itemInfo.institutionId ?? 'unknown',
+              institutionName: 'Sandbox Bank',
+              userId: options.userId,
+              status: 'active',
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            });
+
+            console.error('');
+            console.error('=== Link Complete ===');
+            console.error(`Item ID: ${exchangeResult.itemId}`);
+            console.error(`Stored at: ${store.getFilePath()}`);
+            console.error('');
+            console.error('Next steps:');
+            console.error('  pnpm parse-boa plaid list              # List all linked items');
+            console.error('  pnpm parse-boa plaid sync --item-id <id>  # Sync transactions');
           }
-
-          // Save to file store for persistence
-          await store.saveItem({
-            itemId: exchangeResult.itemId,
-            accessToken: exchangeResult.accessToken,
-            institutionId: itemInfo.institutionId ?? 'unknown',
-            institutionName: 'Sandbox Bank',
-            userId: options.userId,
-            status: 'active',
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          });
-
-          console.error('');
-          console.error('=== Link Complete ===');
-          console.error(`Item ID: ${exchangeResult.itemId}`);
-          console.error(`Stored at: ${store.getFilePath()}`);
-          console.error('');
-          console.error('Next steps:');
-          console.error('  pnpm parse-boa plaid list              # List all linked items');
-          console.error('  pnpm parse-boa plaid sync --item-id <id>  # Sync transactions');
           break;
         }
 
@@ -1345,6 +1547,87 @@ program
           break;
         }
 
+        case 'sync-all': {
+          if (options.userId === undefined || options.userId === '') {
+            console.error('[ERROR] --user-id is required for sync-all');
+            process.exit(1);
+          }
+
+          // Check for Supabase configuration
+          const supabaseUrl = process.env['SUPABASE_URL'];
+          const supabaseKey = process.env['SUPABASE_ANON_KEY'];
+
+          if (supabaseUrl === undefined || supabaseUrl === '' || supabaseKey === undefined || supabaseKey === '') {
+            console.error('[ERROR] Supabase configuration required for sync-all');
+            console.error('');
+            console.error('Please set the following environment variables:');
+            console.error('  SUPABASE_URL=your-supabase-url');
+            console.error('  SUPABASE_ANON_KEY=your-anon-key');
+            process.exit(1);
+          }
+
+          const { createSyncService } = await import('../plaid/sync-service.js');
+          const { createSupabaseClient } = await import('../supabase/index.js');
+
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+          const supabaseClient = createSupabaseClient({
+            url: supabaseUrl,
+            anonKey: supabaseKey,
+          });
+
+          console.error(`[INFO] Syncing all Plaid items for user: ${options.userId}`);
+
+          const syncService = createSyncService(
+            options.verbose === true
+              ? {
+                  supabaseClient,
+                  userId: options.userId,
+                  onProgress: (event): void => {
+                    console.error(`[INFO] Item ${event.itemId}: ${event.phase} (+${event.added} ~${event.modified} -${event.removed})`);
+                    if (event.error !== undefined) {
+                      console.error(`[ERROR] ${event.error.message}`);
+                    }
+                  },
+                }
+              : {
+                  supabaseClient,
+                  userId: options.userId,
+                }
+          );
+
+          const results = await syncService.syncAllItems();
+
+          console.error('');
+          console.error('=== Sync All Complete ===');
+          console.error(`Items synced: ${results.length}`);
+
+          let totalInserted = 0;
+          let totalSkipped = 0;
+          let totalRemoved = 0;
+          let totalDuration = 0;
+
+          for (const result of results) {
+            totalInserted += result.transactionsInserted;
+            totalSkipped += result.transactionsSkipped;
+            totalRemoved += result.transactionsRemoved;
+            totalDuration += result.duration;
+
+            if (options.verbose === true) {
+              console.error(`  ${result.itemId}: +${result.transactionsInserted} inserted, ${result.transactionsSkipped} skipped, -${result.transactionsRemoved} removed (${result.duration}ms)`);
+            }
+          }
+
+          console.error(`Transactions inserted: ${totalInserted}`);
+          console.error(`Transactions skipped:  ${totalSkipped}`);
+          console.error(`Transactions removed:  ${totalRemoved}`);
+          console.error(`Total duration:        ${totalDuration}ms`);
+          console.error('=========================');
+
+          // Output results as JSON
+          console.log(JSON.stringify(results, null, 2));
+          break;
+        }
+
         case 'remove': {
           if (options.itemId === undefined || options.itemId === '') {
             console.error('[ERROR] --item-id is required for remove');
@@ -1381,31 +1664,54 @@ program
           const fs = await import('fs');
           const path = await import('path');
 
-          // Get PDF file from remaining args or prompt
-          const pdfArg = process.argv.find((arg) => arg.endsWith('.pdf'));
-          if (pdfArg === undefined) {
-            console.error('[ERROR] PDF file path required for reconcile');
-            console.error('Usage: pnpm parse-boa plaid reconcile --item-id <id> <path/to/statement.pdf>');
+          // Get input file from remaining args (supports .pdf or .json)
+          const inputArg = process.argv.find((arg) => arg.endsWith('.pdf') || arg.endsWith('.json'));
+          if (inputArg === undefined) {
+            console.error('[ERROR] Input file required for reconcile (PDF or parsed JSON result)');
+            console.error('Usage:');
+            console.error('  pnpm parse-boa plaid reconcile --item-id <id> <path/to/statement.pdf>');
+            console.error('  pnpm parse-boa plaid reconcile --item-id <id> <path/to/result.json>');
             process.exit(1);
           }
 
-          const pdfPath = path.resolve(pdfArg);
-          if (!fs.existsSync(pdfPath)) {
-            console.error(`[ERROR] PDF file not found: ${pdfPath}`);
+          const inputPath = path.resolve(inputArg);
+          if (!fs.existsSync(inputPath)) {
+            console.error(`[ERROR] Input file not found: ${inputPath}`);
             process.exit(1);
           }
 
-          console.error(`[INFO] Loading PDF: ${pdfPath}`);
-          const pdfData = await extractPDF(pdfPath);
-          const parseResult = parseBoaMultipleStatements(pdfData);
+          // Extract PDF transactions from either a PDF or a pre-parsed JSON result
+          let pdfTransactions: { date: string; amount: number; description: string; merchant?: string | { name: string | null } | null }[];
 
-          if (parseResult.statements.length === 0) {
-            console.error('[ERROR] No statements found in PDF');
-            process.exit(1);
+          if (inputPath.endsWith('.json')) {
+            // Load from pre-parsed result JSON (v2 format)
+            console.error(`[INFO] Loading parsed result: ${inputPath}`);
+            /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call */
+            const resultData = JSON.parse(fs.readFileSync(inputPath, 'utf-8'));
+            const accounts = resultData.accounts ?? [];
+            pdfTransactions = accounts.flatMap((a: { transactions?: { date: string; amount: number; description: string; merchant?: string | null }[] }) =>
+              (a.transactions ?? []).map((t: { date: string; amount: number; description: string; merchant?: string | null; direction?: string }) => ({
+                date: t.date,
+                amount: Math.abs(t.amount),
+                description: t.description,
+                merchant: t.merchant ?? null,
+              }))
+            );
+            /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call */
+          } else {
+            // Parse from PDF
+            console.error(`[INFO] Loading PDF: ${inputPath}`);
+            const pdfData = await extractPDF(inputPath);
+            const parseResult = parseBoaMultipleStatements(pdfData);
+
+            if (parseResult.statements.length === 0) {
+              console.error('[ERROR] No statements found in PDF');
+              process.exit(1);
+            }
+
+            pdfTransactions = parseResult.statements.flatMap((s) => s.transactions);
           }
 
-          // Get all transactions from PDF
-          const pdfTransactions = parseResult.statements.flatMap((s) => s.transactions);
           console.error(`[INFO] Found ${pdfTransactions.length} PDF transactions`);
 
           // Get Plaid transactions
@@ -1415,7 +1721,8 @@ program
             process.exit(1);
           }
 
-          console.error(`[INFO] Syncing Plaid transactions...`);
+          console.error(`[INFO] Syncing Plaid transactions (full sync)...`);
+          await store.updateSyncCursor(options.itemId, '');
           const syncResult = await syncItemTransactions(options.itemId, undefined, store);
           const plaidTransactions = syncResult.added;
           console.error(`[INFO] Found ${plaidTransactions.length} Plaid transactions`);
@@ -1431,6 +1738,90 @@ program
 
           // Output JSON to stdout
           console.log(JSON.stringify(reconcileResult, null, 2));
+          break;
+        }
+
+        case 'merge': {
+          if (options.itemId === undefined || options.itemId === '') {
+            console.error('[ERROR] --item-id is required for merge');
+            console.error('Use: pnpm parse-boa plaid list  to see available items');
+            process.exit(1);
+          }
+
+          const { reconcileTransactions: mergeReconcile } = await import('../plaid/reconcile.js');
+          const { mergePlaidData, formatMergeReport } = await import('../plaid/merge.js');
+          const mergeFs = await import('fs');
+          const mergePath = await import('path');
+
+          // Get JSON result file from remaining args
+          const mergeArg = process.argv.find((arg) => arg.endsWith('.json'));
+          if (mergeArg === undefined) {
+            console.error('[ERROR] result.json file required for merge');
+            console.error('Usage: pnpm parse-boa plaid merge --item-id <id> <path/to/result.json>');
+            process.exit(1);
+          }
+
+          const mergeInputPath = mergePath.resolve(mergeArg);
+          if (!mergeFs.existsSync(mergeInputPath)) {
+            console.error(`[ERROR] File not found: ${mergeInputPath}`);
+            process.exit(1);
+          }
+
+          // Load result.json
+          console.error(`[INFO] Loading result: ${mergeInputPath}`);
+          /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument */
+          const resultJson = JSON.parse(mergeFs.readFileSync(mergeInputPath, 'utf-8'));
+
+          // Extract PDF transactions for reconciliation
+          const mergeAccounts = resultJson.accounts ?? [];
+          const mergePdfTxns = mergeAccounts.flatMap((a: { transactions?: { date: string; amount: number; description: string; merchant?: string | null; transactionId?: string }[] }) =>
+            (a.transactions ?? []).map((t: { date: string; amount: number; description: string; merchant?: string | null; transactionId?: string }) => ({
+              transactionId: t.transactionId,
+              date: t.date,
+              amount: Math.abs(t.amount),
+              description: t.description,
+              merchant: t.merchant ?? null,
+            }))
+          );
+          console.error(`[INFO] Found ${mergePdfTxns.length} PDF transactions`);
+
+          // Get Plaid transactions (full sync)
+          const mergeItem = await store.getItem(options.itemId);
+          if (mergeItem === null) {
+            console.error(`[ERROR] Item not found: ${options.itemId}`);
+            process.exit(1);
+          }
+
+          console.error(`[INFO] Syncing Plaid transactions (full sync)...`);
+          await store.updateSyncCursor(options.itemId, '');
+          const mergeSyncResult = await syncItemTransactions(options.itemId, undefined, store);
+          const mergePlaidTxns = mergeSyncResult.added;
+          console.error(`[INFO] Found ${mergePlaidTxns.length} Plaid transactions`);
+
+          // Get Plaid accounts for metadata
+          const { getAccounts: getMergeAccounts } = await import('../plaid/transactions.js');
+          const plaidAccounts = await getMergeAccounts(mergeItem.accessToken);
+
+          // Reconcile
+          console.error('[INFO] Reconciling...');
+          const mergeReconcileResult = mergeReconcile(mergePdfTxns, mergePlaidTxns);
+
+          // Merge
+          console.error('[INFO] Merging Plaid data into result...');
+          const { result: mergedResult, stats } = mergePlaidData(resultJson, mergeReconcileResult, plaidAccounts);
+          /* eslint-enable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-argument */
+
+          // Output report
+          const mergeReport = formatMergeReport(stats);
+          console.error(mergeReport);
+
+          // Write merged result
+          const outputPath = mergeInputPath; // Overwrite the input file
+          mergeFs.writeFileSync(outputPath, JSON.stringify(mergedResult, null, 2), 'utf-8');
+          console.error(`[INFO] Merged result written to: ${outputPath}`);
+
+          // Also output to stdout
+          console.log(JSON.stringify(mergedResult, null, 2));
           break;
         }
 
@@ -1541,7 +1932,7 @@ program
 
         default:
           console.error(`[ERROR] Unknown action: ${action}`);
-          console.error('Valid actions: link, list, status, sync, remove, reconcile, identity, auth, liabilities, holdings, test');
+          console.error('Valid actions: link, list, status, sync, sync-all, remove, reconcile, identity, auth, liabilities, holdings, test');
           process.exit(1);
       }
     } catch (error) {
