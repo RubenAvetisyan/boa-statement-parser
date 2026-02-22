@@ -61,6 +61,7 @@ export {
   getAccounts,
   getTransactionByTransactionId,
   getDailyBalance,
+  getAccountDateRanges,
   type TransactionFilter,
   type TransactionRow,
   type StatementFilter,
@@ -72,6 +73,7 @@ export {
   type MerchantSpendingRow,
   type TransactionNeedingReviewRow,
   type AccountRow,
+  type AccountDateRange,
 } from './queries.js';
 
 // Override functions

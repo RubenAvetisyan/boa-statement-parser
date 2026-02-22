@@ -288,28 +288,34 @@ export function reconcileTransactions(
   const sortedPdf = [...pdfTransactions].sort((a, b) => a.date.localeCompare(b.date));
   const sortedPlaid = [...plaidTransactions].sort((a, b) => a.date.localeCompare(b.date));
 
+  // Track matched PDF transactions by index (transactionId may be undefined)
+  const matchedPdfIndices = new Set<number>();
+
   // First pass: find exact matches
-  for (const pdfTx of sortedPdf) {
+  for (let i = 0; i < sortedPdf.length; i++) {
+    const pdfTx = sortedPdf[i];
+    if (pdfTx === undefined) continue;
     const match = findBestMatch(pdfTx, sortedPlaid, usedPlaidIds, opts);
 
     if (match !== null && match.matchType === 'exact') {
       matched.push(match);
       usedPlaidIds.add(match.plaidTransaction.transactionId);
+      matchedPdfIndices.add(i);
     }
   }
 
   // Second pass: find fuzzy matches for remaining
-  const matchedPdfIds = new Set(matched.map((m) => m.pdfTransaction.transactionId));
-
-  for (const pdfTx of sortedPdf) {
-    if (matchedPdfIds.has(pdfTx.transactionId)) continue;
+  for (let i = 0; i < sortedPdf.length; i++) {
+    if (matchedPdfIndices.has(i)) continue;
+    const pdfTx = sortedPdf[i];
+    if (pdfTx === undefined) continue;
 
     const match = findBestMatch(pdfTx, sortedPlaid, usedPlaidIds, opts);
 
     if (match !== null) {
       matched.push(match);
       usedPlaidIds.add(match.plaidTransaction.transactionId);
-      matchedPdfIds.add(pdfTx.transactionId);
+      matchedPdfIndices.add(i);
     } else {
       unmatchedPdf.push(pdfTx);
     }

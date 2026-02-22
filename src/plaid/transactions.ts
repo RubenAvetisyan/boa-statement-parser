@@ -277,3 +277,160 @@ function mapPlaidTransaction(tx: Record<string, unknown>): PlaidTransaction {
 
   return result;
 }
+
+/**
+ * Fetch transactions for a specific date range using /transactions/get.
+ * Unlike sync (cursor-based), this endpoint supports start_date/end_date filtering.
+ * Handles pagination automatically.
+ */
+export async function getTransactionsByDateRange(
+  accessToken: string,
+  startDate: string,
+  endDate: string,
+  accountIds?: string[]
+): Promise<PlaidTransaction[]> {
+  const client = getPlaidClient();
+  const allTransactions: PlaidTransaction[] = [];
+  let offset = 0;
+  const count = 500;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const request: any = {
+      access_token: accessToken,
+      start_date: startDate,
+      end_date: endDate,
+      options: {
+        count,
+        offset,
+      },
+    };
+
+    if (accountIds !== undefined && accountIds.length > 0) {
+      request.options.account_ids = accountIds;
+    }
+
+    const response = await client.transactionsGet(request);
+    const transactions: PlaidTransaction[] = response.data.transactions.map(
+      (tx: any) => mapPlaidTransaction(tx as Record<string, unknown>)
+    );
+
+    allTransactions.push(...transactions);
+
+    const totalTransactions = response.data.total_transactions;
+    offset += transactions.length;
+
+    if (offset >= totalTransactions || transactions.length === 0) {
+      break;
+    }
+  }
+
+  return allTransactions;
+}
+
+/**
+ * Get the earliest transaction date available in Plaid for each account.
+ * Fetches 1 transaction from a very early start date to find the boundary.
+ * Returns a map of accountId → earliest date (ISO string).
+ */
+export async function getEarliestTransactionDates(
+  accessToken: string
+): Promise<Map<string, string>> {
+  const client = getPlaidClient();
+  const result = new Map<string, string>();
+
+  // Plaid typically has ~2 years of history. Use a very early date.
+  const request: any = {
+    access_token: accessToken,
+    start_date: '2000-01-01',
+    end_date: new Date().toISOString().split('T')[0],
+    options: {
+      count: 1,
+      offset: 0,
+    },
+  };
+
+  try {
+    const response = await client.transactionsGet(request);
+    const accounts = response.data.accounts as any[];
+    const transactions = response.data.transactions as any[];
+
+    // The first transaction returned is the most recent (Plaid sorts desc by default)
+    // We need the total count to find the last page
+    const totalTransactions = response.data.total_transactions;
+
+    if (totalTransactions > 0) {
+      // Fetch the last page to get the earliest transaction
+      const lastOffset = Math.max(0, totalTransactions - 1);
+      const lastRequest: any = {
+        access_token: accessToken,
+        start_date: '2000-01-01',
+        end_date: new Date().toISOString().split('T')[0],
+        options: {
+          count: 1,
+          offset: lastOffset,
+        },
+      };
+
+      const lastResponse = await client.transactionsGet(lastRequest);
+      const lastTxns = lastResponse.data.transactions as any[];
+
+      if (lastTxns.length > 0) {
+        // This is the earliest transaction across all accounts
+        const earliestDate = lastTxns[0].date as string;
+
+        // Set this as the earliest for all accounts in this item
+        for (const acct of accounts) {
+          result.set(acct.account_id as string, earliestDate);
+        }
+      }
+    }
+  } catch {
+    // If the call fails, return empty — caller will skip optimization
+  }
+
+  // Now refine per-account by fetching per account_id
+  for (const [accountId] of result) {
+    try {
+      const perAcctRequest: any = {
+        access_token: accessToken,
+        start_date: '2000-01-01',
+        end_date: new Date().toISOString().split('T')[0],
+        options: {
+          count: 1,
+          offset: 0,
+          account_ids: [accountId],
+        },
+      };
+
+      const perAcctResponse = await client.transactionsGet(perAcctRequest);
+      const total = perAcctResponse.data.total_transactions;
+
+      if (total > 0) {
+        const lastOffset = Math.max(0, total - 1);
+        const lastReq: any = {
+          access_token: accessToken,
+          start_date: '2000-01-01',
+          end_date: new Date().toISOString().split('T')[0],
+          options: {
+            count: 1,
+            offset: lastOffset,
+            account_ids: [accountId],
+          },
+        };
+
+        const lastResp = await client.transactionsGet(lastReq);
+        const lastTxns = lastResp.data.transactions as any[];
+        if (lastTxns.length > 0) {
+          result.set(accountId, lastTxns[0].date as string);
+        }
+      } else {
+        result.delete(accountId);
+      }
+    } catch {
+      // Keep the item-level estimate
+    }
+  }
+
+  return result;
+}

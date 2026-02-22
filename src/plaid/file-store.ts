@@ -113,6 +113,90 @@ export class FilePlaidItemStore implements PlaidItemStore {
   }
 }
 
+// ─── Gap Cache ───────────────────────────────────────────────────────────────
+
+interface GapCacheEntry {
+  start: string;
+  end: string;
+  checkedAt: string;
+}
+
+interface GapCacheData {
+  [accountKey: string]: GapCacheEntry[];
+}
+
+interface EarliestDateCache {
+  [plaidAccountId: string]: { date: string; checkedAt: string };
+}
+
+/**
+ * Persistent cache of date ranges that were checked via Plaid and returned 0 results.
+ * Prevents re-fetching empty gaps on subsequent runs.
+ */
+export class PlaidGapCache {
+  private data: GapCacheData = {};
+  private earliestDates: EarliestDateCache = {};
+  private filePath: string;
+
+  constructor(filePath?: string) {
+    this.filePath = filePath ?? join(homedir(), '.boa-parser', 'plaid-gap-cache.json');
+    this.load();
+  }
+
+  private load(): void {
+    try {
+      if (existsSync(this.filePath)) {
+        const raw = JSON.parse(readFileSync(this.filePath, 'utf-8')) as Record<string, unknown>;
+        // Support both old format (just GapCacheData) and new format with _earliestDates
+        if (raw['_earliestDates'] !== undefined) {
+          this.earliestDates = raw['_earliestDates'] as EarliestDateCache;
+          delete raw['_earliestDates'];
+        }
+        this.data = raw as GapCacheData;
+      }
+    } catch {
+      this.data = {};
+      this.earliestDates = {};
+    }
+  }
+
+  private save(): void {
+    try {
+      const dir = dirname(this.filePath);
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true });
+      }
+      const toWrite = { ...this.data, _earliestDates: this.earliestDates };
+      writeFileSync(this.filePath, JSON.stringify(toWrite, null, 2), 'utf-8');
+    } catch { /* ignore */ }
+  }
+
+  getCheckedRanges(accountKey: string): Array<{ start: string; end: string }> {
+    return (this.data[accountKey] ?? []).map((e) => ({ start: e.start, end: e.end }));
+  }
+
+  markChecked(accountKey: string, start: string, end: string): void {
+    if (this.data[accountKey] === undefined) {
+      this.data[accountKey] = [];
+    }
+    // Avoid duplicates
+    const exists = this.data[accountKey]!.some((e) => e.start === start && e.end === end);
+    if (!exists) {
+      this.data[accountKey]!.push({ start, end, checkedAt: new Date().toISOString() });
+      this.save();
+    }
+  }
+
+  getEarliestDate(plaidAccountId: string): string | null {
+    return this.earliestDates[plaidAccountId]?.date ?? null;
+  }
+
+  setEarliestDate(plaidAccountId: string, date: string): void {
+    this.earliestDates[plaidAccountId] = { date, checkedAt: new Date().toISOString() };
+    this.save();
+  }
+}
+
 let defaultFileStore: FilePlaidItemStore | null = null;
 
 export function getFilePlaidItemStore(filePath?: string): FilePlaidItemStore {

@@ -84,13 +84,13 @@ See [Export Formats](./export-formats.md) for details on CSV and OFX output.
 ## Schema Version Selection
 
 ```bash
-# Use v1 (default)
+# Use v2 rollup format (default)
 pnpm parse-boa ./statement.pdf
 
-# Explicitly use v1
+# Explicitly use v1 flat format
 pnpm parse-boa ./statement.pdf --schema-version v1
 
-# Use v2 rollup format
+# Explicitly use v2
 pnpm parse-boa ./statement.pdf --schema-version v2
 
 # Use environment variable
@@ -147,7 +147,7 @@ See [Supabase Integration](./supabase.md) for setup and details.
 # Test Plaid connection
 pnpm parse-boa plaid test
 
-# Link a new bank account (sandbox mode)
+# Link a new bank account
 pnpm parse-boa plaid link --user-id "your-user-uuid"
 
 # List linked accounts
@@ -159,8 +159,14 @@ pnpm parse-boa plaid sync --item-id <id>
 # Sync all linked items
 pnpm parse-boa plaid sync-all --user-id "your-user-uuid"
 
-# Reconcile PDF vs Plaid transactions
+# Reconcile PDF vs Plaid transactions (monthly statement)
 pnpm parse-boa plaid reconcile --item-id <id> ./statement.pdf
+
+# Reconcile "Print Transaction Details" PDF from online banking
+pnpm parse-boa plaid reconcile --item-id <id> ./transaction-details.pdf
+
+# Reconcile from pre-parsed JSON result
+pnpm parse-boa plaid reconcile --item-id <id> ./result.json
 ```
 
 See [Plaid Integration](./plaid.md) for full command reference.
@@ -178,7 +184,7 @@ See [Plaid Integration](./plaid.md) for full command reference.
 | `--pretty` | Pretty-print JSON output (default: true) |
 | `--no-pretty` | Disable pretty-printing |
 | `--single` | Parse as single statement (legacy mode) |
-| `--schema-version <v1\|v2>` | Output schema version (default: v1) |
+| `--schema-version <v1\|v2>` | Output schema version (default: v2) |
 | `--train-ml` | Train ML categorizer from parsed transactions |
 | `--ml` | Use ML-based categorization (hybrid mode) |
 | `--model <path>` | Path to ML model directory (for loading) |

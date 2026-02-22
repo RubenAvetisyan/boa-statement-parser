@@ -22,7 +22,11 @@ Optional integration with Plaid for live banking data ingestion, complementing t
 # .env
 PLAID_CLIENT_ID=your-client-id
 PLAID_SECRET=your-secret
-PLAID_ENV=sandbox  # or development, production
+PLAID_ENV=sandbox  # or production
+
+# Required for OAuth-based banks (e.g. Bank of America in production)
+# Must be registered in Plaid Dashboard > Team Settings > API > Allowed redirect URIs
+PLAID_REDIRECT_URI=https://localhost:8484/oauth-callback
 ```
 
 ## CLI Commands
@@ -31,7 +35,7 @@ PLAID_ENV=sandbox  # or development, production
 # Test Plaid connection
 pnpm parse-boa plaid test
 
-# Link a new bank account (sandbox mode)
+# Link a new bank account
 pnpm parse-boa plaid link --user-id "your-user-uuid"
 
 # List linked accounts
@@ -54,6 +58,12 @@ pnpm parse-boa plaid remove --item-id <id>
 
 # Reconcile PDF vs Plaid transactions
 pnpm parse-boa plaid reconcile --item-id <id> ./statement.pdf
+
+# Also supports "Print Transaction Details" PDFs from BOA online banking
+pnpm parse-boa plaid reconcile --item-id <id> ./transaction-details.pdf
+
+# Or reconcile from a pre-parsed JSON result
+pnpm parse-boa plaid reconcile --item-id <id> ./result.json
 
 # Advanced: Get account owner identity
 pnpm parse-boa plaid identity --item-id <id>
@@ -118,7 +128,10 @@ syncService.stopScheduledSync();
 
 ## Reconciliation
 
-The reconciliation engine matches PDF-derived transactions against Plaid data:
+The reconciliation engine matches PDF-derived transactions against Plaid data. It auto-detects the PDF format:
+
+- **Monthly statements** — standard BOA statement PDFs parsed via `parseBoaMultipleStatements`
+- **"Print Transaction Details"** — online banking transaction export PDFs parsed via `parseTransactionDetails`
 
 | Match Type | Description |
 |------------|-------------|
@@ -169,5 +182,6 @@ app.post('/webhooks/plaid', handler);
 |----------|-------------|
 | `PLAID_CLIENT_ID` | Plaid API client ID |
 | `PLAID_SECRET` | Plaid API secret |
-| `PLAID_ENV` | Environment: `sandbox`, `development`, or `production` |
+| `PLAID_ENV` | Environment: `sandbox` or `production` (default: `sandbox`) |
 | `PLAID_WEBHOOK_URL` | Optional webhook endpoint URL |
+| `PLAID_REDIRECT_URI` | OAuth redirect URI (required for OAuth-based banks like BOA) |

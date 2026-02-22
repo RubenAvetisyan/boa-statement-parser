@@ -393,6 +393,80 @@ export async function getTransactionByTransactionId(
   return data;
 }
 
+export interface AccountDateRange {
+  accountId: string;
+  institution: string;
+  accountType: string;
+  accountNumberMasked: string;
+  minDate: string;
+  maxDate: string;
+  transactionCount: number;
+}
+
+/**
+ * Get the min/max transaction date range for each account.
+ * Used by the unified sync pipeline to detect coverage gaps.
+ */
+export async function getAccountDateRanges(
+  client: SupabaseClientAny,
+  userId: string
+): Promise<AccountDateRange[]> {
+  // Join accounts with an aggregate sub-query on transactions
+  const { data: accounts, error: accErr } = await client
+    .from('accounts')
+    .select('id, institution, account_type, account_number_masked')
+    .eq('user_id', userId);
+
+  if (accErr) {
+    throw new Error(`Failed to get accounts: ${accErr.message}`);
+  }
+
+  const results: AccountDateRange[] = [];
+
+  for (const acc of accounts ?? []) {
+    const { data: agg, error: aggErr } = await client
+      .from('transactions')
+      .select('date')
+      .eq('user_id', userId)
+      .eq('account_id', acc.id)
+      .order('date', { ascending: true })
+      .limit(1);
+
+    const { data: aggMax, error: aggMaxErr } = await client
+      .from('transactions')
+      .select('date')
+      .eq('user_id', userId)
+      .eq('account_id', acc.id)
+      .order('date', { ascending: false })
+      .limit(1);
+
+    const { count, error: cntErr } = await client
+      .from('transactions')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('account_id', acc.id);
+
+    if (aggErr || aggMaxErr || cntErr) continue;
+
+    const minDate = agg?.[0]?.date;
+    const maxDate = aggMax?.[0]?.date;
+
+    if (minDate && maxDate) {
+      results.push({
+        accountId: acc.id,
+        institution: acc.institution,
+        accountType: acc.account_type,
+        accountNumberMasked: acc.account_number_masked,
+        minDate,
+        maxDate,
+        transactionCount: count ?? 0,
+      });
+    }
+  }
+
+  return results;
+}
+
 /**
  * Get daily balance for an account.
  */

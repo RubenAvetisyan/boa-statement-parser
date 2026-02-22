@@ -21,3 +21,4 @@ result_*.json
 stmt.csv
 test-result.json
 .plaid-certs/
+debug*

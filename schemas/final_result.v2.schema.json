@@ -14,9 +14,19 @@
       "type": "string",
       "description": "Optional minor revision indicator (e.g., '2.0.1') without changing schemaVersion"
     },
-    "startingBalance": { "type": "number" },
-    "endingBalance": { "type": "number" },
-    "totalStatements": { "type": "integer", "minimum": 0 },
+    "startingBalance": {
+      "type": "number",
+      "description": "Sum of startingBalance across all accounts. For single-account outputs this equals the account startingBalance. For multi-account outputs this is the aggregate (net worth) starting balance."
+    },
+    "endingBalance": {
+      "type": "number",
+      "description": "Sum of endingBalance across all accounts. For single-account outputs this equals the account endingBalance. For multi-account outputs this is the aggregate (net worth) ending balance."
+    },
+    "totalStatements": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of source PDF statement files parsed. This counts source documents, not calendar months."
+    },
     "totalTransactions": { "type": "integer", "minimum": 0 },
     "accounts": {
       "type": "array",
@@ -439,6 +449,16 @@
       "additionalProperties": false,
       "description": "Information about data sources used to generate this output",
       "properties": {
+        "requestedRange": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The date range requested for this build",
+          "required": ["start", "end"],
+          "properties": {
+            "start": { "type": "string", "format": "date" },
+            "end": { "type": "string", "format": "date" }
+          }
+        },
         "pdf": {
           "type": "object",
           "additionalProperties": false,
@@ -447,6 +467,18 @@
             "files": { "type": "array", "items": { "type": "string" } },
             "transactionCount": { "type": "integer", "minimum": 0 },
             "parseDate": { "type": "string", "format": "date-time" }
+          }
+        },
+        "database": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Database upload statistics when DB is used as source of truth",
+          "properties": {
+            "pdfUploaded": { "type": "integer", "minimum": 0 },
+            "pdfSkipped": { "type": "integer", "minimum": 0 },
+            "plaidUploaded": { "type": "integer", "minimum": 0 },
+            "plaidSkipped": { "type": "integer", "minimum": 0 },
+            "sourceOfTruth": { "type": "boolean" }
           }
         },
         "plaid": {
@@ -458,7 +490,25 @@
             "institutionName": { "type": "string" },
             "transactionCount": { "type": "integer", "minimum": 0 },
             "syncDate": { "type": "string", "format": "date-time" },
-            "cursor": { "type": "string" }
+            "cursor": { "type": "string" },
+            "fetchedGaps": {
+              "description": "Date ranges fetched from Plaid to fill coverage gaps",
+              "oneOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["start", "end"],
+                    "properties": {
+                      "start": { "type": "string", "format": "date" },
+                      "end": { "type": "string", "format": "date" }
+                    }
+                  }
+                },
+                { "type": "string" }
+              ]
+            }
           }
         }
       }
@@ -493,13 +543,17 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["plaidTransactionId", "matchConfidence", "matchType", "differences"],
-      "description": "Plaid transaction match information for a PDF transaction",
+      "description": "Plaid transaction match information. For reconciled PDF transactions or Plaid-only gap-fill transactions.",
       "properties": {
         "plaidTransactionId": { "type": "string" },
         "matchConfidence": { "$ref": "#/$defs/confidence" },
         "matchType": {
           "type": "string",
-          "enum": ["exact", "fuzzy", "amount_date", "amount_only"]
+          "enum": ["exact", "fuzzy", "amount_date", "amount_only", "plaid_only"]
+        },
+        "source": {
+          "type": "string",
+          "description": "Origin of this Plaid transaction (e.g. 'gap_fill' for transactions fetched to fill date gaps)"
         },
         "merchantName": { "type": "string" },
         "location": {

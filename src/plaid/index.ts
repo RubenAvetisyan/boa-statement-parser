@@ -66,6 +66,7 @@ export {
   syncItemTransactions,
   getAccounts,
   getAccountBalances,
+  getTransactionsByDateRange,
 } from './transactions.js';
 
 // Normalizer
@@ -199,3 +200,15 @@ export {
   type SyncResult,
   type SyncStatus,
 } from './sync-service.js';
+
+// Unified Sync Pipeline (multi-PDF + Supabase + Plaid → v2)
+export {
+  runUnifiedSync,
+  scanAndParsePdfs,
+  type UnifiedSyncOptions,
+  type UnifiedSyncResult,
+  type AccountKey,
+  type DateRange,
+  type AccountCoverage,
+  type ParsedPdfFile,
+} from './unified-sync.js';

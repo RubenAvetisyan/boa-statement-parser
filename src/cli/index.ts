@@ -1292,11 +1292,14 @@ TF_CPP_MIN_LOG_LEVEL=2
 program
   .command('plaid')
   .description('Plaid API integration commands')
-  .argument('<action>', 'Action: link, list, status, sync, sync-all, remove, reconcile, merge, identity, auth, liabilities, holdings, test')
+  .argument('<action>', 'Action: link, list, status, sync, sync-all, remove, reconcile, merge, build, identity, auth, liabilities, holdings, test')
   .option('--item-id <id>', 'Plaid item ID')
   .option('--user-id <id>', 'User ID for Plaid operations', process.env['BOA_USER_ID'])
   .option('--username <name>', 'Sandbox username for custom test data (e.g. custom_boa)', process.env['PLAID_SANDBOX_USERNAME'])
   .option('--institution <id>', 'Institution ID to pre-select (e.g. ins_4 for Bank of America)')
+  .option('-d, --inputDir <directory>', 'Directory containing PDF files (for build command)', process.env['BOA_INPUT_DIR'])
+  .option('--start-date <date>', 'Start date for data range (YYYY-MM-DD). Defaults to earliest PDF date.')
+  .option('--end-date <date>', 'End date for data range (YYYY-MM-DD). Defaults to today.')
   .option('--full', 'Full sync (ignore cursor)')
   .option('-v, --verbose', 'Verbose output')
   .action(async (action: string, options: {
@@ -1304,6 +1307,9 @@ program
     userId?: string;
     username?: string;
     institution?: string;
+    inputDir?: string;
+    startDate?: string;
+    endDate?: string;
     full?: boolean;
     verbose?: boolean;
   }) => {
@@ -1683,6 +1689,9 @@ program
           // Extract PDF transactions from either a PDF or a pre-parsed JSON result
           let pdfTransactions: { date: string; amount: number; description: string; merchant?: string | { name: string | null } | null }[];
 
+          // Track transaction-details parse result for v2 output building
+          let transactionDetailsResult: Awaited<ReturnType<typeof import('../parsers/boa/index.js')['parseTransactionDetails']>> | null = null;
+
           if (inputPath.endsWith('.json')) {
             // Load from pre-parsed result JSON (v2 format)
             console.error(`[INFO] Loading parsed result: ${inputPath}`);
@@ -1702,14 +1711,34 @@ program
             // Parse from PDF
             console.error(`[INFO] Loading PDF: ${inputPath}`);
             const pdfData = await extractPDF(inputPath);
-            const parseResult = parseBoaMultipleStatements(pdfData);
 
-            if (parseResult.statements.length === 0) {
-              console.error('[ERROR] No statements found in PDF');
-              process.exit(1);
+            // Detect if this is a "Print Transaction Details" PDF from online banking
+            const { isTransactionDetailsPDF, parseTransactionDetails } = await import('../parsers/boa/index.js');
+
+            if (isTransactionDetailsPDF(pdfData)) {
+              console.error('[INFO] Detected BOA "Print Transaction Details" format');
+              transactionDetailsResult = parseTransactionDetails(pdfData);
+              if (transactionDetailsResult.warnings.length > 0) {
+                for (const w of transactionDetailsResult.warnings) {
+                  console.error(`[WARN] ${w}`);
+                }
+              }
+              pdfTransactions = transactionDetailsResult.transactions.map((t) => ({
+                date: t.date,
+                amount: Math.abs(parseFloat(t.amount.replace(/,/g, ''))),
+                description: t.description,
+                merchant: null,
+              }));
+            } else {
+              const parseResult = parseBoaMultipleStatements(pdfData);
+
+              if (parseResult.statements.length === 0) {
+                console.error('[ERROR] No statements found in PDF');
+                process.exit(1);
+              }
+
+              pdfTransactions = parseResult.statements.flatMap((s) => s.transactions);
             }
-
-            pdfTransactions = parseResult.statements.flatMap((s) => s.transactions);
           }
 
           console.error(`[INFO] Found ${pdfTransactions.length} PDF transactions`);
@@ -1727,6 +1756,10 @@ program
           const plaidTransactions = syncResult.added;
           console.error(`[INFO] Found ${plaidTransactions.length} Plaid transactions`);
 
+          // Get Plaid accounts for metadata
+          const { getAccounts: getReconcileAccounts } = await import('../plaid/transactions.js');
+          const reconcilePlaidAccounts = await getReconcileAccounts(item.accessToken);
+
           // Reconcile
           console.error('[INFO] Reconciling transactions...');
           const reconcileResult = reconcileTransactions(pdfTransactions, plaidTransactions);
@@ -1736,8 +1769,53 @@ program
           console.error('');
           console.error(report);
 
-          // Output JSON to stdout
-          console.log(JSON.stringify(reconcileResult, null, 2));
+          // Build schema-valid v2 output if we have transaction-details parse data
+          if (transactionDetailsResult !== null) {
+            const { transactionDetailsToParsedStatement, buildV2FromTransactionDetails } = await import('../plaid/v2-builder.js');
+
+            const parsedStatement = transactionDetailsToParsedStatement(
+              transactionDetailsResult.accountInfo,
+              transactionDetailsResult.balanceInfo,
+              transactionDetailsResult.transactions,
+              transactionDetailsResult.warnings
+            );
+
+            const v2Output = buildV2FromTransactionDetails(
+              parsedStatement,
+              reconcileResult,
+              reconcilePlaidAccounts,
+              plaidTransactions,
+              {
+                pdfPath: inputPath,
+                itemId: options.itemId,
+                institutionName: item.institutionName ?? 'Bank of America',
+              }
+            );
+
+            console.error('[INFO] Built schema-valid v2 output');
+            const v2Json = JSON.stringify(v2Output, null, 2);
+
+            // Write to file if --out specified, otherwise stdout
+            const outArg = process.argv.find((a, i) => i > 0 && (process.argv[i - 1] === '--out' || process.argv[i - 1] === '-o'));
+            if (outArg !== undefined) {
+              const outPath = path.resolve(outArg);
+              fs.writeFileSync(outPath, v2Json, 'utf-8');
+              console.error(`[INFO] Output written to: ${outPath}`);
+            } else {
+              console.log(v2Json);
+            }
+          } else {
+            // Fallback: output raw reconciliation result
+            const rawJson = JSON.stringify(reconcileResult, null, 2);
+            const outArg = process.argv.find((a, i) => i > 0 && (process.argv[i - 1] === '--out' || process.argv[i - 1] === '-o'));
+            if (outArg !== undefined) {
+              const outPath = path.resolve(outArg);
+              fs.writeFileSync(outPath, rawJson, 'utf-8');
+              console.error(`[INFO] Output written to: ${outPath}`);
+            } else {
+              console.log(rawJson);
+            }
+          }
           break;
         }
 
@@ -1822,6 +1900,149 @@ program
 
           // Also output to stdout
           console.log(JSON.stringify(mergedResult, null, 2));
+          break;
+        }
+
+        case 'build': {
+          const { runUnifiedSync } = await import('../plaid/unified-sync.js');
+          const buildFs = await import('fs');
+          const buildPath = await import('path');
+
+          // Optionally connect Supabase
+          let buildSupabaseClient: unknown = undefined;
+          let buildUserId: string | undefined = undefined;
+          try {
+            const { isSupabaseConfigured, getSupabaseClient: getSbClient } = await import('../supabase/client.js');
+            if (isSupabaseConfigured()) {
+              buildSupabaseClient = getSbClient();
+              buildUserId = options.userId ?? process.env['SUPABASE_USER_ID'];
+              if (buildUserId !== undefined) {
+                console.error('[INFO] Supabase connected — will check for existing data');
+              }
+            }
+          } catch {
+            // Supabase not configured, that's fine
+          }
+
+          // Get input directory: check subcommand option, parent option (consumed by commander),
+          // process.argv fallback, or BOA_INPUT_DIR env var
+          const buildInputDir = options.inputDir
+            ?? process.argv.find((a, i) => i > 0 && (process.argv[i - 1] === '--inputDir' || process.argv[i - 1] === '-d'))
+            ?? process.env['BOA_INPUT_DIR'];
+
+          // inputDir is optional when DB is configured as source of truth
+          if ((buildInputDir === undefined || buildInputDir === '') && !buildSupabaseClient) {
+            console.error('[ERROR] --inputDir is required when no database is configured');
+            console.error('Usage:');
+            console.error('  pnpm parse-boa plaid build --inputDir ./TEST --out result.json');
+            console.error('  pnpm parse-boa plaid build --start-date 2024-01-01 --out result.json  (DB mode)');
+            process.exit(1);
+          }
+
+          // Validate date options if provided
+          if (options.startDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(options.startDate)) {
+            console.error(`[ERROR] Invalid --start-date format: ${options.startDate}. Use YYYY-MM-DD.`);
+            process.exit(1);
+          }
+          if (options.endDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(options.endDate)) {
+            console.error(`[ERROR] Invalid --end-date format: ${options.endDate}. Use YYYY-MM-DD.`);
+            process.exit(1);
+          }
+
+          const syncResult = await runUnifiedSync({
+            inputDir: buildInputDir,
+            store,
+            supabaseClient: buildSupabaseClient,
+            userId: buildUserId,
+            startDate: options.startDate,
+            endDate: options.endDate,
+            verbose: options.verbose === true,
+            log: (msg) => console.error(msg),
+          });
+
+          // Summary
+          console.error('');
+          console.error('=== Build Summary ===');
+          console.error(`  PDF files:          ${syncResult.stats.pdfFiles}`);
+          console.error(`  Accounts:           ${syncResult.stats.accounts}`);
+          console.error(`  PDF transactions:   ${syncResult.stats.pdfTransactions}`);
+          console.error(`  Plaid transactions: ${syncResult.stats.plaidTransactions}`);
+          if (syncResult.stats.plaidOnlyAdded > 0) {
+            console.error(`  Plaid-only added:   ${syncResult.stats.plaidOnlyAdded}`);
+          }
+          if (syncResult.stats.supabaseTransactions > 0) {
+            console.error(`  DB transactions:    ${syncResult.stats.supabaseTransactions}`);
+          }
+          console.error(`  Matched:            ${syncResult.stats.matchedTransactions}`);
+          console.error(`  Total output:       ${syncResult.stats.totalTransactions}`);
+          console.error('=====================');
+
+          const buildJson = JSON.stringify(syncResult.v2Output, null, 2);
+
+          // Write to file if --out specified
+          const buildOutArg = process.argv.find((a, i) => i > 0 && (process.argv[i - 1] === '--out' || process.argv[i - 1] === '-o'));
+          if (buildOutArg !== undefined) {
+            const buildOutPath = buildPath.resolve(buildOutArg);
+            buildFs.writeFileSync(buildOutPath, buildJson, 'utf-8');
+            console.error(`[INFO] Output written to: ${buildOutPath}`);
+          } else {
+            console.log(buildJson);
+          }
+
+          // ML Training: if BOA_TRAIN_ML=true, train from the build output
+          if (envBool('BOA_TRAIN_ML', false)) {
+            console.error('');
+            console.error('[ML] Training ML categorizer from build output...');
+
+            // Extract training examples from v2 output accounts/transactions
+            const v2Accounts = (syncResult.v2Output as Record<string, unknown>)['accounts'] as Array<Record<string, unknown>> | undefined;
+            const parsedExamples: Array<{ description: string; category: string; subcategory: string | null }> = [];
+
+            if (v2Accounts !== undefined) {
+              for (const acct of v2Accounts) {
+                const txns = acct['transactions'] as Array<Record<string, unknown>> | undefined;
+                if (txns === undefined) continue;
+                for (const tx of txns) {
+                  const cat = tx['category'] as string | undefined;
+                  if (cat !== undefined && cat !== 'Uncategorized') {
+                    parsedExamples.push({
+                      description: tx['description'] as string,
+                      category: cat,
+                      subcategory: (tx['subcategory'] as string | null) ?? null,
+                    });
+                  }
+                }
+              }
+            }
+
+            console.error(`[ML] Extracted ${parsedExamples.length} categorized transactions for training`);
+
+            // Convert to training examples and augment with synthetic data
+            const mlTrainingData = generateFromParsedTransactions(
+              parsedExamples as Array<{ description: string; category: import('../types/output.js').Category; subcategory: import('../types/output.js').Subcategory }>
+            );
+            const syntheticData = generateTrainingData(2000);
+            const allTrainingData = [...mlTrainingData, ...syntheticData];
+            console.error(`[ML] Total training examples: ${allTrainingData.length} (${parsedExamples.length} from build + ${syntheticData.length} synthetic)`);
+
+            // Train
+            const epochs = parseInt(process.env['BOA_EPOCHS'] ?? '50', 10);
+            const categorizer = new HybridCategorizer();
+            await categorizer.initialize();
+
+            console.error(`[ML] Training (${epochs} epochs)... this may take a few minutes`);
+            await categorizer.trainML(allTrainingData, { epochs, batchSize: 32 });
+            console.error('[ML] Training complete!');
+            console.error(categorizer.getMLModelSummary());
+
+            // Save model
+            const mlModelOut = process.env['BOA_MODEL_OUT'] ?? './models/categorizer';
+            const mlModelPath = buildPath.resolve(mlModelOut);
+            await mkdir(dirname(mlModelPath), { recursive: true });
+            await categorizer.saveMLModel(mlModelPath);
+            console.error(`[ML] Model saved to: ${mlModelPath}`);
+          }
+
           break;
         }
 
@@ -1932,7 +2153,7 @@ program
 
         default:
           console.error(`[ERROR] Unknown action: ${action}`);
-          console.error('Valid actions: link, list, status, sync, sync-all, remove, reconcile, identity, auth, liabilities, holdings, test');
+          console.error('Valid actions: link, list, status, sync, sync-all, remove, reconcile, merge, build, identity, auth, liabilities, holdings, test');
           process.exit(1);
       }
     } catch (error) {
