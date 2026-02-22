@@ -1,6 +1,6 @@
 {
   "name": "boa-statement-parser",
-  "version": "1.4.1",
+  "version": "2.0.0",
   "description": "Production-ready Bank of America statement PDF parser with transaction categorization",
   "type": "module",
   "main": "dist/index.js",
